@@ -1,30 +1,31 @@
 # Execuções por seção e nacionais
 
-## Objetivo
+## Abrangência configurável
 
-O mesmo coletor deve aceitar uma seção explícita para desenvolvimento e validação, além de um modo nacional que possa ser acionado manualmente no GitHub Actions. O modo nacional será implementado, mas não executado até a prova de conceito por seção ser validada e aprovada.
+O catálogo `arquivo-urna/3220/config/{uf}/{uf}-p003220-cs.jws` fornece a hierarquia de municípios, zonas e seções (`abr → mu → zon → sec`). A aplicação o baixa por UF, preserva cada JWS recebido, calcula SHA-256, registra a resposta HTTP e produz um inventário ordenado. O payload do catálogo é decodificado para seleção, mas a assinatura JWS permanece explicitamente não verificada.
 
 ## Interface planejada
 
-- `section`: recebe UF, município, zona e seção como strings, preservando zeros à esquerda. É o modo padrão para desenvolvimento e reproduz exatamente uma unidade de coleta.
-- `national`: recebe um inventário oficial versionado/identificado, particiona seções em lotes retomáveis e registra progresso e falhas por seção/arquivo.
-- Ambos usam a mesma descoberta de manifesto, download, validação e armazenamento bruto. O seletor altera o inventário de entrada, não a semântica do processamento.
+- Cada campo UF, município, zona e seção é um filtro opcional e cumulativo. Campos em branco ampliam a busca; todos em branco consultam as UFs e o exterior.
+- `tools/discover_sections.py` aceita `--config-id`, os quatro filtros, `--offset` e `--limit`; salva os JWS originais e `section-inventory.json` com os parâmetros, hashes, cobertura e diagnósticos.
+- `tools/collect_sections.py` aceita o array ou relatório de inventário e encaminha cada seção ao mesmo coletor de seção. `--data-id` seleciona a base independente dos manifestos (`3221` por padrão); o identificador de catálogo é `3220` por padrão.
+- Paginação é ordenada por UF/município/zona/seção. Durante a publicação progressiva dos dados pelo TSE, filtros territoriais são preferíveis a offsets, pois a composição do catálogo pode mudar entre execuções. Cada execução registra os metadados e o hash observados.
 
 ## GitHub Actions
 
-- Workflow manual (`workflow_dispatch`) com escolha explícita `section` ou `national`.
-- O modo `section` exige os quatro identificadores e executa somente essa seção.
-- O modo `national` exige aprovação por proteção de ambiente do GitHub, usa inventário oficial congelado por versão/hash e divide a carga em lotes independentes com checkpoints externos duráveis.
-- Artefatos e resumos registram commit do código, versão do inventário, parâmetros, cobertura, horários, erros e hashes dos arquivos brutos.
-- O modo por seção pode coletar RDV: preservar original, manifesto e metadados de aquisição em artefato separado com retenção de 90 dias. O relatório inclui registros individuais e agregações. Não relacionar registros a eleitores, horários ou logs; não tratar posição como tempo nem como chave compartilhada entre cargos. `vota.vsc` segue fora da coleta.
-- A workflow será habilitada para execução nacional somente após medir duração, armazenamento, limites do Actions e taxa segura no piloto. Filesystem efêmero do runner não é checkpoint.
+- `Coleta por abrangência` é manual (`workflow_dispatch`), aceita qualquer combinação dos quatro filtros, enumera seções e executa um lote de até 100 seções. O padrão é 10; nenhum job roda sem acionamento explícito.
+- `Piloto de coleta de seção` permanece disponível para repetição direta de uma seção.
+- A execução sem filtros coleta apenas a página solicitada, nunca todo o país numa única execução por padrão. Para cobrir o país, o operador amplia lotes com filtros e revê catálogo, duração, tamanho e diagnósticos entre execuções.
+- Inventário e coleta registram parâmetros, arquivos-fonte, hashes, cobertura, horários e falhas por seção; os artefatos têm retenção de 90 dias. O lote atual não é um checkpoint durável: offsets referem-se ao catálogo obtido naquela execução.
+- O processamento preserva RDV original, manifesto e metadados de aquisição. O relatório inclui registros individuais e agregações. Não relacionar registros a eleitores, horários ou logs; não tratar posição como tempo nem como chave compartilhada entre cargos. `vota.vsc` segue fora da coleta.
+- A workflow está habilitada apenas para acionamento manual e limitada a 100 seções por execução. Lotes nacionais maiores dependem de validar o padrão em todas as UFs, custo, armazenamento, assinatura e estabilidade do inventário. Filesystem efêmero do runner não é checkpoint.
 
 ## Portões de validação
 
 1. Auditar licença e decisões do projeto de referência; não importar dados derivados.
 2. Revalidar o manifesto oficial da seção piloto, interpretar o formato assinado e sua cadeia de confiança, listar todos os hashes/arquivos e baixar BU e log sem substituir bytes originais.
 3. Confirmar checksum local, metadados HTTP, armazenamento atômico, retomada/idempotência e parser sem presumir nomes de eventos.
-4. Só então medir custo e habilitar uma execução nacional protegida no Actions. A configuração do workflow, por si só, não autoriza nem inicia essa execução.
+4. Antes de lotes maiores, validar o padrão `cs.jws` em todas as UFs, a completude semântica do inventário, o vínculo entre IDs de catálogo e de dados, assinatura criptográfica e custo real do lote. A configuração do workflow, por si só, não inicia uma execução.
 
 ## Limites analíticos
 

@@ -1,6 +1,25 @@
 # observatorio-urnas
 
-Coleta pontual de arquivos públicos do TSE por seção, preservando bytes originais, metadados HTTP e SHA-256. O piloto atual aceita UF, município, zona e seção; a expansão nacional depende da validação dos formatos e do dimensionamento do armazenamento/checkpoints.
+Coleta de arquivos públicos do TSE por seção, preservando bytes originais, metadados HTTP e SHA-256. O inventário oficial `cs.jws` permite descobrir as seções por UF; filtros opcionais de UF, município, zona e seção reduzem a abrangência. Os manifestos, BU, RDV e logs continuam sendo processados pelo mesmo coletor por seção.
+
+## Descobrir e filtrar seções
+
+O catálogo estadual é salvo sem alteração em `inventario/catalogs/`, e o inventário filtrado em `inventario/section-inventory.json`. Datas e horas do catálogo (`da`, `ha`) são preservadas como texto bruto. A assinatura JWS é registrada como não verificada.
+
+```sh
+# Uma seção, para reproduzir o piloto
+python tools/discover_sections.py --uf es --municipio 56251 --zona 0054 --secao 0509 --limit 10
+
+# Todas as seções da zona 0054 de Cariacica
+python tools/discover_sections.py --uf es --municipio 56251 --zona 0054 --limit 1000
+
+# Primeiras 100 seções do inventário nacional; aumente o offset para outra página
+python tools/discover_sections.py --limit 100 --offset 0
+python tools/collect_sections.py --sections inventario/section-inventory.json --data-id 3221 \
+  --output dados --report reports/coleta-lote.json
+```
+
+`--config-id` escolhe o catálogo de seções (`3220` por padrão); `--data-id` escolhe a base dos manifestos por seção (`3221` por padrão). São identificadores separados. O limite do CLI é 5.000 seções; a execução pelo Actions limita cada lote a 100. Para seções específicas, prefira os filtros geográficos, que são mais estáveis do que paginação enquanto o catálogo oficial muda.
 
 ## Rodar o piloto de Cariacica
 
@@ -17,6 +36,8 @@ Os dados brutos ficam em `dados/`, ignorado pelo Git. O relatório contém times
 
 ## GitHub Actions
 
-Na aba **Actions**, escolha **Piloto de coleta de seção** → **Run workflow**. Os campos já vêm preenchidos com Cariacica/ES, município 56251, zona 0054, seção 0509. Edite os cortes HH:MM se necessário. O workflow baixa manifesto, BU e log, gera o relatório e o publica como artefato por 30 dias. A coleta nacional não está habilitada neste workflow.
+Na aba **Actions**, escolha **Coleta por abrangência**. Informe qualquer combinação de UF, município, zona e seção; deixe em branco os campos que deseja ampliar. Todos vazios descobrem o inventário nacional, mas a execução coleta no máximo 10 seções por padrão (ajustável até 100). `offset` seleciona outra página ordenada do catálogo. O workflow publica catálogos originais, inventário, aquisições e relatórios como artefato por 90 dias. Ele não é disparado automaticamente.
+
+O workflow **Piloto de coleta de seção** continua disponível para repetir uma única seção.
 
 Consulte `docs/` para a auditoria da referência, desenho de escala e evidências/limitações do piloto.

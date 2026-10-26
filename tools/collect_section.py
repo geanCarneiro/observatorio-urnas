@@ -21,7 +21,7 @@ from pathlib import Path
 
 from diagnostics import diagnostic, file_state, summarize_diagnostics, verify_jws_signature
 
-BASE = "https://resultados.tse.jus.br/oficial/ele2026/arquivo-urna/3221/dados"
+BASE_TEMPLATE = "https://resultados.tse.jus.br/oficial/ele2026/arquivo-urna/{data_id}/dados"
 USER_AGENT = "observatorio-urnas/0.1 (section-level research collection)"
 MAX_BYTES = 64 * 1024 * 1024
 
@@ -127,6 +127,7 @@ def main() -> int:
     parser.add_argument("--municipio", required=True)
     parser.add_argument("--zona", required=True)
     parser.add_argument("--secao", required=True)
+    parser.add_argument("--data-id", default="3221", help="TSE arquivo-urna dataset ID (default: 3221)")
     parser.add_argument("--output", type=Path, default=Path("dados-brutos"))
     args = parser.parse_args()
     if not re.fullmatch(r"[a-z]{2}", args.uf):
@@ -134,12 +135,15 @@ def main() -> int:
     municipality = identifier(args.municipio, 5, "municipio")
     zone = identifier(args.zona, 4, "zona")
     section = identifier(args.secao, 4, "secao")
+    if not re.fullmatch(r"\d{4}", args.data_id):
+        parser.error("data-id must contain exactly four digits")
+    base = BASE_TEMPLATE.format(data_id=args.data_id)
     key = f"{args.uf}/{municipality}/{zone}/{section}"
-    stem = f"p003221-{args.uf}-m{municipality}-z{zone}-s{section}-aux.jws"
-    manifest_url = f"{BASE}/{key}/{stem}"
+    stem = f"p00{args.data_id}-{args.uf}-m{municipality}-z{zone}-s{section}-aux.jws"
+    manifest_url = f"{base}/{key}/{stem}"
     acquisition_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     root = args.output / key / "runs" / acquisition_id
-    run = {"section_key": key, "manifest_url": manifest_url,
+    run = {"section_key": key, "data_id": args.data_id, "manifest_url": manifest_url,
            "acquired_at_utc": datetime.now(timezone.utc).isoformat(), "signature_status": "unverified",
            "files": [], "file_states": [], "diagnostics": []}
     manifest_path = root / "manifest.aux.jws"
@@ -271,7 +275,7 @@ def main() -> int:
                         file_path=None, position={"entry_index": entry_index, "file_index": file_index}, context={"name": name}))
                     run["file_states"].append(file_state(file_type=file_type, name=str(name), section=key, status="failed", reason="unsafe filename"))
                     continue
-                url = f"{BASE}/{key}/{content_hash}/{quote(name, safe='-_.')}"
+                url = f"{base}/{key}/{content_hash}/{quote(name, safe='-_.')}"
                 relative = Path(content_hash) / name
                 destination = root / relative
                 state = {"type": file_type, "name": name, "manifest_hash": content_hash,

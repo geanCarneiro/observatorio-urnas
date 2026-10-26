@@ -145,6 +145,7 @@ class DiagnosticPipelineTests(unittest.TestCase):
                                   {"uf": "es", "municipio": "2", "zona": "1", "secao": "2"}],
                                  Path("unused-output"), runner)
         self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][calls[0].index("--data-id") + 1], "3221")
         self.assertEqual([section["status"] for section in report["sections"]], ["failed", "collected"])
         self.assertEqual(report["section_count"], 2)
         self.assertEqual(report["diagnostics"][0]["code"], "BATCH_SECTION_COLLECTION_FAILED")

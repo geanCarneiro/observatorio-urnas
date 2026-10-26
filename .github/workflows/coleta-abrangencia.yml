@@ -1,0 +1,141 @@
+name: Coleta por abrangência
+
+on:
+  workflow_dispatch:
+    inputs:
+      uf:
+        description: UF (vazio para todas as UFs e exterior)
+        type: string
+        required: false
+        default: ''
+      municipio:
+        description: Código TSE do município (opcional)
+        type: string
+        required: false
+        default: ''
+      zona:
+        description: Zona (opcional; mantenha zeros à esquerda)
+        type: string
+        required: false
+        default: ''
+      secao:
+        description: Seção (opcional; mantenha zeros à esquerda)
+        type: string
+        required: false
+        default: ''
+      config_id:
+        description: ID arquivo-urna do catálogo cs.jws
+        type: string
+        required: true
+        default: '3220'
+      data_id:
+        description: ID arquivo-urna dos manifestos por seção
+        type: string
+        required: true
+        default: '3221'
+      offset:
+        description: Posição inicial na lista filtrada e ordenada
+        type: string
+        required: true
+        default: '0'
+      max_secoes:
+        description: Limite desta execução (1 a 100)
+        type: string
+        required: true
+        default: '10'
+      cortes_horarios:
+        description: Cortes HH:MM separados por vírgula (escala bruta do log)
+        type: string
+        required: true
+        default: '17:00,17:15,17:30,17:45,18:00,18:30,19:00'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coleta-abrangencia-${{ inputs.uf || 'br' }}-${{ inputs.municipio || 'todos' }}-${{ inputs.zona || 'todas' }}-${{ inputs.secao || 'todas' }}-${{ inputs.offset }}
+  cancel-in-progress: false
+
+jobs:
+  descobrir-e-coletar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validar limite da execução
+        env:
+          LIMIT: ${{ inputs.max_secoes }}
+          OFFSET: ${{ inputs.offset }}
+          CONFIG_ID: ${{ inputs.config_id }}
+          DATA_ID: ${{ inputs.data_id }}
+        run: |
+          python - <<'PY'
+          import os
+          limit=int(os.environ['LIMIT']); offset=int(os.environ['OFFSET'])
+          if not 1 <= limit <= 100: raise SystemExit('max_secoes precisa estar entre 1 e 100')
+          if offset < 0: raise SystemExit('offset não pode ser negativo')
+          for key in ('CONFIG_ID', 'DATA_ID'):
+              if len(os.environ[key]) != 4 or not os.environ[key].isdigit(): raise SystemExit(f'{key} precisa ter quatro dígitos')
+          PY
+      - name: Instalar dependências
+        run: python -m pip install -r requirements.txt
+      - name: Descobrir seções e aplicar filtros territoriais
+        env:
+          UF: ${{ inputs.uf }}
+          MUNICIPIO: ${{ inputs.municipio }}
+          ZONA: ${{ inputs.zona }}
+          SECAO: ${{ inputs.secao }}
+          CONFIG_ID: ${{ inputs.config_id }}
+          OFFSET: ${{ inputs.offset }}
+          LIMIT: ${{ inputs.max_secoes }}
+        run: |
+          ARGS=(--config-id "$CONFIG_ID" --offset "$OFFSET" --limit "$LIMIT" --output inventario)
+          if [[ -n "$UF" ]]; then ARGS+=(--uf "$UF"); fi
+          if [[ -n "$MUNICIPIO" ]]; then ARGS+=(--municipio "$MUNICIPIO"); fi
+          if [[ -n "$ZONA" ]]; then ARGS+=(--zona "$ZONA"); fi
+          if [[ -n "$SECAO" ]]; then ARGS+=(--secao "$SECAO"); fi
+          python tools/discover_sections.py "${ARGS[@]}" > "$RUNNER_TEMP/inventory-summary.json"
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          x=json.load(open(__import__('os').path.join(__import__('os').environ['RUNNER_TEMP'],'inventory-summary.json')))
+          print('### Inventário selecionado')
+          print(f"Status: **{x['status']}**; correspondências: **{x['matching_section_count']}**; nesta execução: **{x['selection']['selected_count']}**.")
+          print(f"Filtros: `{json.dumps(x['filters'], ensure_ascii=False)}`; próxima posição: `{x['selection']['next_offset']}`.")
+          PY
+      - name: Coletar seções selecionadas
+        env:
+          DATA_ID: ${{ inputs.data_id }}
+        run: |
+          mkdir -p dados reports
+          python tools/collect_sections.py --sections inventario/section-inventory.json --data-id "$DATA_ID" --output dados --report reports/coleta-lote.json
+      - name: Analisar cada seção e consolidar diagnósticos
+        env:
+          CORTES: ${{ inputs.cortes_horarios }}
+        run: |
+          ARGS=()
+          while IFS= read -r collection; do ARGS+=(--collection "$collection"); done < <(find dados -name collection.json -type f | sort)
+          if ((${#ARGS[@]})); then
+            CUT_ARGS=()
+            IFS=',' read -ra CUTS <<< "$CORTES"
+            for cut in "${CUTS[@]}"; do CUT_ARGS+=(--cut "$cut"); done
+            python tools/analyze_sections.py "${ARGS[@]}" --output-dir reports/analises "${CUT_ARGS[@]}"
+          else
+            python - <<'PY'
+          import json, pathlib
+          p=pathlib.Path('reports/analises'); p.mkdir(parents=True, exist_ok=True)
+          (p/'diagnosticos-consolidados.json').write_text(json.dumps({'report_type':'consolidated_diagnostics','section_count':0,'sections':[],'diagnostics':[],'diagnostics_summary':{'diagnostic_count':0}}, indent=2)+'\n')
+          PY
+          fi
+      - name: Publicar inventário, originais e relatórios
+        uses: actions/upload-artifact@v4
+        with:
+          name: coleta-${{ inputs.uf || 'br' }}-${{ inputs.municipio || 'todos' }}-${{ inputs.zona || 'todas' }}-${{ inputs.secao || 'todas' }}-offset-${{ inputs.offset }}
+          path: |
+            inventario/
+            dados/
+            reports/
+          if-no-files-found: error
+          retention-days: 90

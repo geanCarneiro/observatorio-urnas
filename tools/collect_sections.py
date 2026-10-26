@@ -12,7 +12,7 @@ from pathlib import Path
 from diagnostics import diagnostic, summarize_diagnostics
 
 
-def collect_sections(sections: list[dict], output_root: Path, runner=subprocess.run) -> dict:
+def collect_sections(sections: list[dict], output_root: Path, runner=subprocess.run, data_id: str = "3221") -> dict:
     diagnostics = []
     results = []
     script = Path(__file__).with_name("collect_section.py")
@@ -22,7 +22,8 @@ def collect_sections(sections: list[dict], output_root: Path, runner=subprocess.
                         str(section.get("zona", "")), str(section.get("secao", ""))))
         command = [sys.executable, str(script), "--uf", str(section.get("uf", "")),
                    "--municipio", str(section.get("municipio", "")), "--zona", str(section.get("zona", "")),
-                   "--secao", str(section.get("secao", "")), "--output", str(output_root)]
+                   "--secao", str(section.get("secao", "")), "--data-id", data_id,
+                   "--output", str(output_root)]
         try:
             completed = runner(command, capture_output=True, text=True, check=False)
             try:
@@ -57,20 +58,27 @@ def collect_sections(sections: list[dict], output_root: Path, runner=subprocess.
                 position={"section_index": index}, context={"command": command}))
             results.append({"section": key, "status": "failed", "return_code": None, "collection_report": None,
                 "diagnostic_count": 1, "file_states": []})
-    return {"report_type": "batch_collection", "section_count": len(results), "sections": results,
+    return {"report_type": "batch_collection", "data_id": data_id,
+            "section_count": len(results), "sections": results,
             "diagnostics": diagnostics, "diagnostic_summary": summarize_diagnostics(diagnostics)}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--sections", type=Path, required=True, help="JSON array of UF/municipio/zona/secao objects")
+    parser.add_argument("--sections", type=Path, required=True,
+                        help="JSON array or section-inventory report with a sections[] array")
+    parser.add_argument("--data-id", default="3221", help="TSE arquivo-urna dataset ID (default: 3221)")
     parser.add_argument("--output", type=Path, default=Path("dados-brutos"))
     parser.add_argument("--report", type=Path, required=True)
     args = parser.parse_args()
     try:
         sections = json.loads(args.sections.read_text(encoding="utf-8"))
+        if isinstance(sections, dict):
+            sections = sections.get("sections")
         if not isinstance(sections, list):
-            raise ValueError("sections JSON must be an array")
+            raise ValueError("sections input must be an array or an inventory report with sections[]")
+        if not (len(args.data_id) == 4 and args.data_id.isdigit()):
+            raise ValueError("data-id must contain exactly four digits")
     except Exception as error:
         sections = []
         diagnostics = [diagnostic(code="BATCH_SECTION_INVENTORY_INVALID", stage="batch_collection",
@@ -79,7 +87,7 @@ def main() -> int:
         result = {"report_type": "batch_collection", "section_count": 0, "sections": [],
                   "diagnostics": diagnostics, "diagnostic_summary": summarize_diagnostics(diagnostics)}
     else:
-        result = collect_sections(sections, args.output)
+        result = collect_sections(sections, args.output, data_id=args.data_id)
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return 0
