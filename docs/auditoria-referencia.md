@@ -11,6 +11,8 @@ Data da inspeção: 2026-10-26. Referência inspecionada: `Jonnes-Santos/urnas-t
 
 Próximo passo: implementação independente de uma prova de conceito por seção, que preserve o manifesto/bytes originais e registre metadados HTTP e SHA-256 local antes de interpretar os dados.
 
-## Esquema ASN.1 usado para diagnóstico do BU
+## Esquema oficial do BU 2026
 
-`schemas/bu.asn1` foi obtido de `danarrib/TSEParser` (`TSE_Docs/spec/bu.asn1`, commit `bc208105decf6a7ccd0d66db35ab02bacbd8c9c9`), repositório licenciado sob GPL-3.0, compatível com a licença GPL-3.0 deste projeto. A especificação é usada apenas para decodificar o envelope e comparar a identificação da seção. O conteúdo interno do BU 2026 falha com incompatibilidade de tag; nenhum número de votação é derivado desse schema. Precisamos localizar a especificação correspondente ao formato 2026 antes de reconciliar contagens.
+A fonte compatível é o pacote **Formato dos arquivos de BU, RDV e assinatura digital**, publicado na página oficial das Eleições 2026 do TSE: `https://www.tse.jus.br/eleicoes/eleicoes-2026-content/arquivos/formato-arquivos-de-bu-rdv-e-assinatura-digital`. O ZIP observado tem SHA-256 `b5ac413e81121d53de2bb1657af611f84a45fdc84388e9d9821872994bbfbafd`; `spec/bu.asn1` tem SHA-256 `ef64bf723f774403b423ed0b617f5a83a3f50c0023d0003e18cd29170404ab81`. `schemas/bu.asn1` contém essa cópia oficial e o relatório verifica seu hash.
+
+O schema antigo usado no primeiro decoder divergia em campos do envelope `Carga`, comparecimento e resultados. A aplicação agora decodifica o envelope e o conteúdo com o schema oficial, confirma a identidade da seção, compara habilitações/votos com comparecimento e totais por cargo, registra diferenças numéricas e expõe o histórico de códigos de carga sem revelar os próprios códigos. A validação da assinatura do JWS e a determinação do fuso são controles separados; decodificar o payload não equivale a verificar a assinatura.

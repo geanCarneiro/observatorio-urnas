@@ -23,6 +23,9 @@ EVENTS = {
     "Procedimento de encerramento confirmado": "conclusao_encerramento",
 }
 DEFAULT_CUTS = ("17:00", "17:15", "17:30", "17:45", "18:00", "18:30", "19:00")
+BU_SCHEMA_SOURCE = "https://www.tse.jus.br/eleicoes/eleicoes-2026-content/arquivos/formato-arquivos-de-bu-rdv-e-assinatura-digital"
+BU_SCHEMA_BUNDLE_SHA256 = "b5ac413e81121d53de2bb1657af611f84a45fdc84388e9d9821872994bbfbafd"
+BU_SCHEMA_SHA256 = "ef64bf723f774403b423ed0b617f5a83a3f50c0023d0003e18cd29170404ab81"
 
 
 def parse_cuts(values: list[str]) -> list[str]:
@@ -40,60 +43,50 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def der_children(data: bytes) -> list[tuple[int, bytes]]:
-    """Read one bounded definite-length BER/DER constructed value."""
-    if not data or data[0] & 0x20 == 0:
-        raise ValueError("expected constructed ASN.1 value")
-    pos = 1
-    first = data[pos]
-    pos += 1
-    if first < 0x80:
-        length = first
-    else:
-        width = first & 0x7f
-        if width == 0 or width > 4 or pos + width > len(data):
-            raise ValueError("unsupported ASN.1 length")
-        length = int.from_bytes(data[pos:pos + width], "big")
-        pos += width
-    end = pos + length
-    if end != len(data):
-        raise ValueError("ASN.1 length does not match input")
-    children = []
-    while pos < end:
-        start = pos
-        tag = data[pos]
-        pos += 1
-        first = data[pos]
-        pos += 1
-        if first < 0x80:
-            size = first
-        else:
-            width = first & 0x7f
-            if width == 0 or width > 4 or pos + width > end:
-                raise ValueError("unsupported nested ASN.1 length")
-            size = int.from_bytes(data[pos:pos + width], "big")
-            pos += width
-        child_end = pos + size
-        if child_end > end:
-            raise ValueError("ASN.1 child exceeds parent")
-        content = data[pos:child_end]
-        pos = child_end
-        children.append((tag, data[start:child_end]))
-    return children
-
-
-def bu_section_times(bu_path: Path, schema_path: Path) -> dict:
+def decode_bu(bu_path: Path, schema_path: Path) -> dict:
     spec = asn1tools.compile_files(str(schema_path), codec="ber")
     envelope = spec.decode("EntidadeEnvelopeGenerico", bu_path.read_bytes())
-    root = der_children(envelope["conteudo"])
-    if len(root) < 6 or root[5][0] != 0xa0:
-        raise ValueError("BU payload does not contain the expected section-data choice")
-    values = [value[2:].decode("ascii") for tag, value in der_children(root[5][1]) if tag == 0x1b]
-    if len(values) != 2:
-        raise ValueError("could not read BU opening/closing timestamps")
-    for value in values:
-        datetime.strptime(value, "%Y%m%dT%H%M%S")
-    return {"opening_raw": values[0], "closing_raw": values[1]}
+    bu = spec.decode("EntidadeBoletimUrna", envelope["conteudo"])
+    election_date = datetime.strptime(bu["dataHoraEmissao"], "%Y%m%dT%H%M%S").strftime("%Y-%m-%d")
+    section_data = bu["dadosSecaoSA"]
+    if section_data[0] != "dadosSecao":
+        section_times = None
+    else:
+        section_times = section_data[1]
+
+    elections = []
+    for election in bu["resultadosVotacaoPorEleicao"]:
+        results = []
+        for result in election["resultadosVotacao"]:
+            cargos = []
+            for cargo in result["totaisVotosCargo"]:
+                code_kind, code_value = cargo["codigoCargo"]
+                vote_total = sum(vote["quantidadeVotos"] for vote in cargo["votosVotaveis"])
+                cargos.append({"cargo_kind": code_kind, "cargo": code_value,
+                               "qtd_votos_bu": vote_total})
+            results.append({"qtd_comparecimento": result["qtdComparecimento"], "cargos": cargos})
+        elections.append({"id_eleicao": election["idEleicao"], "qtd_eleitores_aptos": election["qtdEleitoresAptos"], "results": results})
+
+    attendance_detail = bu.get("detalhamentoComparecimento")
+    if attendance_detail:
+        detail = {key: value for key, value in attendance_detail.items()}
+        detail_sum = sum(detail.values())
+    else:
+        detail, detail_sum = None, None
+    urna_type = bu["urna"]["tipoUrna"]
+    load_codes = bu.get("historicoCodigosCarga", [])
+    data = {
+        "phase": envelope["fase"], "envelope_type": envelope["tipoEnvelope"],
+        "section": bu["identificacaoSecao"], "emitted_at_raw": bu["dataHoraEmissao"],
+        "election_date": election_date, "urn_type": urna_type,
+        "qtd_eleitores_compareceram": bu["qtdEleitoresCompareceram"],
+        "attendance_detail": detail, "attendance_detail_sum": detail_sum,
+        "elections": elections,
+        "load_history_entries": len(load_codes),
+        "unique_load_codes": len(set(load_codes)),
+        "section_times": section_times,
+    }
+    return data
 
 
 def analyze(log_path: Path, bu_path: Path, collection_path: Path, cuts: list[str], schema_path: Path) -> dict:
@@ -168,28 +161,69 @@ def analyze(log_path: Path, bu_path: Path, collection_path: Path, cuts: list[str
             },
         }
 
-    bu_outer = asn1tools.compile_files(str(schema_path), codec="ber").decode("EntidadeEnvelopeGenerico", bu_path.read_bytes())
-    identification = bu_outer["identificacao"]
-    section_id = identification[1].get("municipioZona", {}) if identification[0] == "identificacaoSecaoEleitoral" else {}
-    bu_identity = {"phase": bu_outer["fase"], "envelope_type": bu_outer["tipoEnvelope"],
-                   "municipio": section_id.get("municipio"), "zona": section_id.get("zona"),
-                   "secao": identification[1].get("secao") if identification[0] == "identificacaoSecaoEleitoral" else None}
-    identity_matches = (str(bu_identity["municipio"]) == collection["section_key"].split("/")[1]
-                        and f'{bu_identity["zona"]:04d}' == collection["section_key"].split("/")[2]
-                        and f'{bu_identity["secao"]:04d}' == collection["section_key"].split("/")[3])
-    try:
-        asn1tools.compile_files(str(schema_path), codec="ber").decode("EntidadeBoletimUrna", bu_outer["conteudo"])
-        inner_schema_status = "decoded"
-    except Exception as error:
-        inner_schema_status = f"schema_mismatch:{type(error).__name__}"
-    try:
-        bu_times = bu_section_times(bu_path, schema_path)
-        completion_matches = any(e["event_type"] == "conclusao_encerramento" and e["event_timestamp_raw"] == datetime.strptime(bu_times["closing_raw"], "%Y%m%dT%H%M%S").strftime("%d/%m/%Y %H:%M:%S") for e in events)
-        bu_time_validation = {"status": "clock_agreement" if completion_matches else "clock_disagreement", **bu_times,
-                              "log_closure_matches_bu_closing": completion_matches,
-                              "timezone": "timezone/UTC offset remains unvalidated; matching same-device clocks do not identify a timezone"}
-    except (ValueError, IndexError) as error:
-        bu_time_validation = {"status": "unavailable", "reason": str(error)}
+    bu = decode_bu(bu_path, schema_path)
+    bu_section = bu["section"]
+    municipio_zona = bu_section["municipioZona"]
+    bu_identity = {"phase": bu["phase"], "envelope_type": bu["envelope_type"],
+                   "municipio": municipio_zona["municipio"], "zona": municipio_zona["zona"],
+                   "secao": bu_section["secao"]}
+    expected = collection["section_key"].split("/")
+    identity_matches = (str(bu_identity["municipio"]) == expected[1]
+                        and f'{bu_identity["zona"]:04d}' == expected[2]
+                        and f'{bu_identity["secao"]:04d}' == expected[3])
+    event_counts = counts_by_date.get(bu["election_date"], Counter())
+    attendance_comparisons = {
+        "habilitacoes_vs_bu_attendance": {"log": event_counts.get("habilitacao", 0), "bu": bu["qtd_eleitores_compareceram"]},
+        "votos_computados_vs_bu_attendance": {"log": event_counts.get("voto_computado", 0), "bu": bu["qtd_eleitores_compareceram"]},
+    }
+    for comparison in attendance_comparisons.values():
+        comparison["divergence_log_minus_bu"] = comparison["log"] - comparison["bu"]
+    cargo_event = {"presidente": "voto_confirmado_presidente", "governador": "voto_confirmado_governador"}
+    cargo_comparisons = []
+    for election in bu["elections"]:
+        for result in election["results"]:
+            for cargo in result["cargos"]:
+                log_kind = cargo_event.get(cargo["cargo"])
+                log_count = event_counts.get(log_kind, 0) if log_kind else None
+                cargo_comparisons.append({
+                    "election_id": election["id_eleicao"], "cargo": cargo["cargo"],
+                    "log_confirmations": log_count, "bu_attendance": result["qtd_comparecimento"],
+                    "bu_vote_total": cargo["qtd_votos_bu"],
+                    "divergence_log_vs_bu_attendance": log_count - result["qtd_comparecimento"] if log_count is not None else None,
+                    "divergence_log_vs_bu_votes": log_count - cargo["qtd_votos_bu"] if log_count is not None else None,
+                    "divergence_bu_votes_vs_attendance": cargo["qtd_votos_bu"] - result["qtd_comparecimento"],
+                })
+    comparisons = [*attendance_comparisons.values(), *[
+        {"log": c["log_confirmations"], "bu": c["bu_attendance"], "divergence_log_minus_bu": c["divergence_log_vs_bu_attendance"]}
+        for c in cargo_comparisons if c["log_confirmations"] is not None
+    ]]
+    detail_sum_matches = bu["attendance_detail_sum"] is None or bu["attendance_detail_sum"] == bu["qtd_eleitores_compareceram"]
+    cargo_coverage_complete = bool(cargo_comparisons) and all(c["log_confirmations"] is not None for c in cargo_comparisons)
+    all_reconciled = (bool(comparisons) and cargo_coverage_complete
+                      and all(c["divergence_log_minus_bu"] == 0 for c in comparisons)
+                      and all(c["divergence_bu_votes_vs_attendance"] == 0 for c in cargo_comparisons)
+                      and all(c["divergence_log_vs_bu_votes"] == 0 for c in cargo_comparisons))
+    has_divergence = (not detail_sum_matches or any(c["divergence_log_minus_bu"] != 0 for c in comparisons)
+                      or any(c["divergence_bu_votes_vs_attendance"] != 0 or
+                             (c["divergence_log_vs_bu_votes"] is not None and c["divergence_log_vs_bu_votes"] != 0)
+                             for c in cargo_comparisons))
+    reconciliation_status = "matched" if all_reconciled and detail_sum_matches else "divergence" if has_divergence else "partial"
+    section_times = bu["section_times"] or {}
+    closing_raw = section_times.get("dataHoraEncerramento")
+    closing_event_raw = datetime.strptime(closing_raw, "%Y%m%dT%H%M%S").strftime("%d/%m/%Y %H:%M:%S") if closing_raw else None
+    completion_matches = any(e["event_type"] == "conclusao_encerramento" and e["event_timestamp_raw"] == closing_event_raw for e in events)
+    bu_time_validation = {"status": "clock_agreement" if completion_matches else "clock_disagreement",
+                          "opening_raw": section_times.get("dataHoraAbertura"), "closing_raw": closing_raw,
+                          "log_closure_matches_bu_closing": completion_matches,
+                          "timezone": "timezone/UTC offset remains unvalidated; same-device clock agreement does not identify a timezone"}
+    substitution_signal = (bu["urn_type"] in {"contingencia", "reservaSecao", "reservaEncerrandoSecao"}
+                           or bu["unique_load_codes"] > 1 or substitution_keyword_matches > 0)
+    substitution_validation = {"status": "review_signal" if substitution_signal else "no_signal_detected_in_available_fields",
+                               "urn_type": bu["urn_type"], "manifest_hash_entries": len(collection["manifest_payload_unverified"].get("hashes", [])),
+                               "load_history_entries": bu["load_history_entries"], "unique_load_codes": bu["unique_load_codes"],
+                               "log_keyword_signal_count": substitution_keyword_matches,
+                               "scope_note": "absence of a signal is not proof that no substitution occurred"}
+    schema_hash = sha256(schema_path)
 
     integrity = {
         "manifest_sha256_matches_collection": sha256(collection_path.parent / "manifest.aux.jws") == collection["manifest_sha256"],
@@ -202,14 +236,22 @@ def analyze(log_path: Path, bu_path: Path, collection_path: Path, cuts: list[str
         "section_key": collection["section_key"],
         "acquisition_id": collection["acquired_at_utc"],
         "source_files": {"manifest_sha256": collection["manifest_sha256"], "log_sha256": metadata["sha256"], "bu_sha256": bu_metadata["sha256"]},
+        "bu_schema": {"source": BU_SCHEMA_SOURCE, "bundle_sha256": BU_SCHEMA_BUNDLE_SHA256,
+                       "schema_sha256": schema_hash, "expected_schema_sha256": BU_SCHEMA_SHA256,
+                       "matches_official_copy": schema_hash == BU_SCHEMA_SHA256},
+        "bu_attendance": {"total": bu["qtd_eleitores_compareceram"], "detail": bu["attendance_detail"],
+                           "detail_sum": bu["attendance_detail_sum"], "detail_sum_matches_total": detail_sum_matches,
+                           "urn_type": bu["urn_type"]},
         "validation": {
             "integrity": integrity,
             "timezone": {"status": "unvalidated", "reason": "log timestamps contain no timezone; no external clock reference has been authenticated"},
             "bu_clock_crosscheck": bu_time_validation,
-            "urn_substitution": {"status": "inconclusive", "manifest_hash_entries": len(collection["manifest_payload_unverified"].get("hashes", [])), "log_keyword_signal_count": substitution_keyword_matches, "reason": "manifest and log keyword screening are not a complete urn-substitution history; BU correspondence fields could not be decoded"},
+            "urn_substitution": substitution_validation,
             "bu_envelope_identity": {"status": "matched" if identity_matches else "mismatch", **bu_identity},
-            "bu_inner_schema": inner_schema_status,
-            "bu_reconciliation": {"status": "unavailable", "log_vote_events_by_date": {d: c.get("voto_computado", 0) for d, c in sorted(counts_by_date.items())}, "bu_vote_counts": None, "divergences": None, "reason": "current inner BU ASN.1 schema is incompatible with this payload; numeric reconciliation and divergence calculation remain unavailable"},
+            "bu_asn1": "decoded",
+            "bu_attendance_detail_sum_matches": detail_sum_matches,
+            "bu_reconciliation": {"status": reconciliation_status,
+                                  "by_attendance_metric": attendance_comparisons, "by_cargo": cargo_comparisons},
         },
         "clock_cuts_hhmm_raw": cuts,
         "event_semantics": EVENTS,
@@ -217,7 +259,7 @@ def analyze(log_path: Path, bu_path: Path, collection_path: Path, cuts: list[str
         "events_by_date": by_date,
         "relevant_events": events,
         "privacy": {"individual_log_fields_excluded": True, "raw_message_or_elector_identifier_included": False},
-        "limitations": ["log clock timezone and drift unvalidated", "JWS signature unverified", "BU inner schema mismatch prevents reconciliation", "counts describe logged events and do not imply causality or irregularity"],
+        "limitations": ["log clock timezone and drift unvalidated", "JWS signature unverified", "possible urn replacement screening is not exhaustive", "counts describe logged events and do not imply causality or irregularity"],
     }
 
 
