@@ -96,7 +96,7 @@ def main() -> int:
     acquisition_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     root = args.output / key / "runs" / acquisition_id
     run = {"section_key": key, "manifest_url": manifest_url,
-            "acquired_at_utc": datetime.now(timezone.utc).isoformat(),
+           "acquired_at_utc": datetime.now(timezone.utc).isoformat(),
            "signature_status": "unverified", "files": []}
     manifest_bytes, manifest_http = fetch(manifest_url)
     header, payload = decode_unverified_jws(manifest_bytes)

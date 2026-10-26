@@ -5,8 +5,12 @@ Coleta pontual de arquivos públicos do TSE por seção, preservando bytes origi
 ## Rodar o piloto de Cariacica
 
 ```sh
+python3 -m pip install -r requirements.txt
 python3 tools/collect_section.py --uf es --municipio 56251 --zona 0054 --secao 0509 --output dados
-python3 tools/analyze_section.py --log "$(find dados/es/56251/0054/0509/runs -name '*-log.jez' -print | sort | tail -1)" --output reports/piloto-secao.json
+RUN=$(find dados/es/56251/0054/0509/runs -mindepth 1 -maxdepth 1 -type d | sort | tail -1)
+python3 tools/analyze_section.py --log "$(find "$RUN" -name '*-log.jez' -print -quit)" \
+  --bu "$(find "$RUN" -name '*-bu.dat' -print -quit)" \
+  --collection "$RUN/collection.json" --output reports/piloto-secao-v2.json
 ```
 
 Os dados brutos ficam em `dados/`, ignorado pelo Git. O relatório contém apenas contagens de uma lista de eventos permitidos e horários agregados; valores de identificadores, biometria e outros campos do log são descartados. O horário/fuso da urna e a assinatura JWS ainda não foram validados, então os números são descritivos e não demonstram causalidade ou irregularidade.

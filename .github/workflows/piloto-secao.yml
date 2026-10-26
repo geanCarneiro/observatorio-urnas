@@ -23,6 +23,11 @@ on:
         type: string
         required: true
         default: '0509'
+      cortes_horarios:
+        description: Cortes HH:MM separados por vírgula (escala bruta do log)
+        type: string
+        required: true
+        default: '17:00,17:15,17:30,17:45,18:00,18:30,19:00'
 
 permissions:
   contents: read
@@ -40,6 +45,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Instalar dependências do decoder ASN.1
+        run: python -m pip install -r requirements.txt
       - name: Coletar manifesto, BU e log
         id: collect
         env:
@@ -58,13 +65,21 @@ jobs:
           print('run_dir=dados/'+x['section_key']+'/runs/'+x['acquisition_id'])
           PY
       - name: Gerar resumo sem identificadores
+        env:
+          CORTES: ${{ inputs.cortes_horarios }}
         run: |
           LOG=$(find "${{ steps.collect.outputs.run_dir }}" -name '*-log.jez' -print -quit)
-          python tools/analyze_section.py --log "$LOG" --output reports/piloto-secao.json
+          BU=$(find "${{ steps.collect.outputs.run_dir }}" -name '*-bu.dat' -print -quit)
+          ARGS=()
+          IFS=',' read -ra CUTS <<< "$CORTES"
+          for cut in "${CUTS[@]}"; do ARGS+=(--cut "$cut"); done
+          python tools/analyze_section.py --log "$LOG" --bu "$BU" \
+            --collection "${{ steps.collect.outputs.run_dir }}/collection.json" \
+            --output reports/piloto-secao-v2.json "${ARGS[@]}"
       - name: Publicar resumo agregado
         uses: actions/upload-artifact@v4
         with:
           name: resumo-piloto-${{ inputs.uf }}-${{ inputs.municipio }}-${{ inputs.zona }}-${{ inputs.secao }}
-          path: reports/piloto-secao.json
+          path: reports/piloto-secao-v2.json
           if-no-files-found: error
           retention-days: 30
