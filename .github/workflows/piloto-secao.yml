@@ -1,0 +1,70 @@
+name: Piloto de coleta de seção
+
+on:
+  workflow_dispatch:
+    inputs:
+      uf:
+        description: UF (duas letras)
+        type: string
+        required: true
+        default: es
+      municipio:
+        description: Código do município
+        type: string
+        required: true
+        default: '56251'
+      zona:
+        description: Zona eleitoral
+        type: string
+        required: true
+        default: '0054'
+      secao:
+        description: Seção eleitoral
+        type: string
+        required: true
+        default: '0509'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: piloto-tse-${{ inputs.uf }}-${{ inputs.municipio }}-${{ inputs.zona }}-${{ inputs.secao }}
+  cancel-in-progress: false
+
+jobs:
+  coletar-e-resumir:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Coletar manifesto, BU e log
+        id: collect
+        env:
+          UF: ${{ inputs.uf }}
+          MUNICIPIO: ${{ inputs.municipio }}
+          ZONA: ${{ inputs.zona }}
+          SECAO: ${{ inputs.secao }}
+        run: |
+          python tools/collect_section.py \
+            --uf "$UF" --municipio "$MUNICIPIO" --zona "$ZONA" --secao "$SECAO" \
+            --output dados > "$RUNNER_TEMP/coleta.json"
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import glob, json, os
+          x=json.load(open(os.path.join(os.environ['RUNNER_TEMP'],'coleta.json')))
+          print('section_key='+x['section_key'])
+          print('run_dir=dados/'+x['section_key']+'/runs/'+x['acquisition_id'])
+          PY
+      - name: Gerar resumo sem identificadores
+        run: |
+          LOG=$(find "${{ steps.collect.outputs.run_dir }}" -name '*-log.jez' -print -quit)
+          python tools/analyze_section.py --log "$LOG" --output reports/piloto-secao.json
+      - name: Publicar resumo agregado
+        uses: actions/upload-artifact@v4
+        with:
+          name: resumo-piloto-${{ inputs.uf }}-${{ inputs.municipio }}-${{ inputs.zona }}-${{ inputs.secao }}
+          path: reports/piloto-secao.json
+          if-no-files-found: error
+          retention-days: 30
