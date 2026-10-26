@@ -36,7 +36,7 @@ Os dados brutos ficam em `dados/`, ignorado pelo Git. O relatório contém times
 
 ## GitHub Actions
 
-Na aba **Actions**, escolha **Coleta por abrangência**. Informe qualquer combinação de UF, município, zona e seção; deixe em branco os campos que deseja ampliar. Todos vazios descobrem o inventário nacional, mas a execução coleta no máximo 10 seções por padrão (ajustável até 100). `offset` seleciona outra página ordenada do catálogo. O workflow publica catálogos originais, inventário, aquisições e relatórios como artefato por 90 dias. Ele não é disparado automaticamente.
+Na aba **Actions**, escolha **Coleta por abrangência**. Informe qualquer combinação de UF, município, zona e seção; cada campo vazio amplia o escopo. Por exemplo, apenas UF traz seções de todos os municípios e zonas daquela UF. Todos vazios consultam o inventário nacional. O lote coleta até 10 seções por padrão (ajustável até 100); se houver mais correspondências, o resumo avisa. O workflow publica catálogos originais, inventário, aquisições e relatórios juntos num artefato por 90 dias. Ele não é disparado automaticamente.
 
 O workflow **Piloto de coleta de seção** continua disponível para repetir uma única seção.
 
