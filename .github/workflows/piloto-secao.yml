@@ -73,7 +73,6 @@ jobs:
           output.mkdir(parents=True, exist_ok=True)
           acquisition=json.load(open(root/'collection.json', encoding='utf-8'))
           rdvs=[item for item in acquisition['files'] if item['type']=='rdv']
-          if not rdvs: raise SystemExit('Nenhum RDV original disponível para preservar')
           for item in rdvs:
               source=root/item['relative_path']
               target=output/item['relative_path']
@@ -82,9 +81,20 @@ jobs:
               digest=hashlib.sha256(target.read_bytes()).hexdigest()
               if digest != item['sha256'] or target.stat().st_size != item['size_bytes']:
                   raise SystemExit(f'Falha ao verificar cópia RDV: {item["name"]}')
-          shutil.copyfile(root/'manifest.aux.jws', output/'manifest.aux.jws')
+          for state in acquisition.get('file_states', []):
+              if state.get('status') != 'partial' or not state.get('path'): continue
+              source=pathlib.Path(state['path'])
+              if not source.is_absolute(): source=pathlib.Path.cwd()/source
+              if not source.exists(): continue
+              target=output/'partial'/str(state.get('type','unknown'))/(state.get('name') or source.name)
+              target.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copyfile(source, target)
+              expected=state.get('sha256')
+              digest=hashlib.sha256(target.read_bytes()).hexdigest()
+              if expected and digest != expected: raise SystemExit(f'Falha ao verificar arquivo parcial: {target.name}')
+          if (root/'manifest.aux.jws').exists(): shutil.copyfile(root/'manifest.aux.jws', output/'manifest.aux.jws')
           shutil.copyfile(root/'collection.json', output/'collection.json')
-          print(f'{len(rdvs)} RDV original(is) preparado(s) com manifesto e hashes de aquisição')
+          print(f'{len(rdvs)} RDV original(is) preparado(s); acquisition diagnostics retained')
           PY
       - name: Preservar RDV original e proveniência
         uses: actions/upload-artifact@v4
@@ -93,33 +103,25 @@ jobs:
           path: rdv-originais/
           if-no-files-found: error
           retention-days: 90
-      - name: Gerar resumo sem identificadores
+      - name: Gerar análise e diagnósticos detalhados
         env:
           CORTES: ${{ inputs.cortes_horarios }}
         run: |
-          LOG=$(find "${{ steps.collect.outputs.run_dir }}" -name '*-log.jez' -print -quit)
-          BU=$(find "${{ steps.collect.outputs.run_dir }}" -name '*-bu.dat' -print -quit)
-          mapfile -t RDV_PATHS < <(python - "${{ steps.collect.outputs.run_dir }}/collection.json" "${{ steps.collect.outputs.run_dir }}" <<'PY'
-          import json, pathlib, sys
-          manifest=json.load(open(sys.argv[1], encoding='utf-8'))
-          root=pathlib.Path(sys.argv[2])
-          paths=[root / item['relative_path'] for item in manifest['files'] if item['type']=='rdv']
-          if not paths:
-              raise SystemExit('O manifesto não forneceu nenhum RDV para esta seção')
-          for path in paths: print(path)
-          PY
-          )
           ARGS=()
           IFS=',' read -ra CUTS <<< "$CORTES"
           for cut in "${CUTS[@]}"; do ARGS+=(--cut "$cut"); done
-          for rdv in "${RDV_PATHS[@]}"; do ARGS+=(--rdv "$rdv"); done
-          python tools/analyze_section.py --log "$LOG" --bu "$BU" \
+          python tools/analyze_section.py \
             --collection "${{ steps.collect.outputs.run_dir }}/collection.json" \
-            --output reports/piloto-secao-v3.json "${ARGS[@]}"
+            --output reports/piloto-secao-v4.json "${ARGS[@]}"
+          python tools/consolidate_diagnostics.py \
+            --report reports/piloto-secao-v4.json \
+            --output reports/diagnosticos-consolidados.json
       - name: Publicar resumo com registros RDV
         uses: actions/upload-artifact@v4
         with:
           name: resumo-piloto-${{ inputs.uf }}-${{ inputs.municipio }}-${{ inputs.zona }}-${{ inputs.secao }}
-          path: reports/piloto-secao-v3.json
+          path: |
+            reports/piloto-secao-v4.json
+            reports/diagnosticos-consolidados.json
           if-no-files-found: error
           retention-days: 30

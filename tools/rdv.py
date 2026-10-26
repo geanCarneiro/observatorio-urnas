@@ -7,6 +7,7 @@ from collections import Counter
 from pathlib import Path
 
 import asn1tools
+from diagnostics import diagnostic
 
 
 RDV_SCHEMA_SOURCE = "https://www.tse.jus.br/eleicoes/eleicoes-2026-content/arquivos/formato-arquivos-de-bu-rdv-e-assinatura-digital"
@@ -39,34 +40,46 @@ class TLV:
         self.tag, self.start, self.content_start, self.end, self.children = tag, start, content_start, end, children
 
 
+class BERParseError(ValueError):
+    def __init__(self, message: str, offset: int):
+        super().__init__(message)
+        self.offset = offset
+
+
+class RDVStructureError(ValueError):
+    def __init__(self, message: str, position: dict):
+        super().__init__(message)
+        self.position = position
+
+
 def _read_length(raw: bytes, offset: int) -> tuple[int, int]:
     if offset >= len(raw):
-        raise ValueError("truncated BER length")
+        raise BERParseError("truncated BER length", offset)
     first = raw[offset]
     if first < 0x80:
         return first, offset + 1
     count = first & 0x7F
     if count == 0:
-        raise ValueError("indefinite BER lengths are not accepted")
+        raise BERParseError("indefinite BER lengths are not accepted", offset)
     if count > 4 or offset + 1 + count > len(raw):
-        raise ValueError("invalid or oversized BER length")
+        raise BERParseError("invalid or oversized BER length", offset)
     size = int.from_bytes(raw[offset + 1:offset + 1 + count], "big")
     if size < 0x80:
-        raise ValueError("non-minimal BER length")
+        raise BERParseError("non-minimal BER length", offset)
     return size, offset + 1 + count
 
 
 def _parse_one(raw: bytes, offset: int) -> tuple[TLV, int]:
     start = offset
     if offset >= len(raw):
-        raise ValueError("truncated BER tag")
+        raise BERParseError("truncated BER tag", offset)
     first = raw[offset]
     offset += 1
     if first & 0x1F == 0x1F:
         tag_bytes = bytearray([first])
         while True:
             if offset >= len(raw) or len(tag_bytes) >= 6:
-                raise ValueError("invalid or oversized BER tag")
+                raise BERParseError("invalid or oversized BER tag", offset)
             octet = raw[offset]
             tag_bytes.append(octet)
             offset += 1
@@ -78,7 +91,7 @@ def _parse_one(raw: bytes, offset: int) -> tuple[TLV, int]:
     length, content_start = _read_length(raw, offset)
     end = content_start + length
     if end > len(raw):
-        raise ValueError("BER value exceeds containing bytes")
+        raise BERParseError("BER value exceeds containing bytes", start)
     children: list[TLV] = []
     if tag[0] & 0x20:
         cursor = content_start
@@ -86,7 +99,7 @@ def _parse_one(raw: bytes, offset: int) -> tuple[TLV, int]:
             child, cursor = _parse_one(raw, cursor)
             children.append(child)
         if cursor != end:
-            raise ValueError("BER constructed value has invalid child boundary")
+            raise BERParseError("BER constructed value has invalid child boundary", cursor)
     return TLV(tag, start, content_start, end, children), end
 
 
@@ -127,7 +140,7 @@ def _elections_path(registry_node: TLV, registry_type: str) -> tuple[TLV, bool]:
         raise ValueError("RDV registry entity does not have the expected five fields")
     choice = children[4]
     if len(choice.tag) != 1 or choice.tag[0] not in (0xA1, 0xA2):
-        raise ValueError(f"unsupported RDV Eleicoes choice tag {choice.tag.hex()}")
+        raise RDVStructureError(f"unsupported RDV Eleicoes choice tag {choice.tag.hex()}", {"byte_offset": choice.start})
     return choice, choice.tag[0] == 0xA2
 
 
@@ -189,7 +202,7 @@ def decode_rdv(rdv_path: Path, collection_path: Path, schema_path: Path, bu: dic
         raise ValueError("decoded election CHOICE disagrees with preserved BER structure")
     election_nodes = choice_node.children
     if len(election_nodes) != len(election_values):
-        raise ValueError("BER election count differs from decoded RDV")
+        raise RDVStructureError("BER election count differs from decoded RDV", {"decoded_election_count": len(election_values), "ber_election_count": len(election_nodes)})
 
     elections = []
     all_records = 0
@@ -198,13 +211,16 @@ def decode_rdv(rdv_path: Path, collection_path: Path, schema_path: Path, bu: dic
         cargo_child_index = 3 if is_sa else 1
         expected_election_fields = 4 if is_sa else 2
         if len(echildren) != expected_election_fields or len(echildren[cargo_child_index].children) != len(election_value["votosCargos"]):
-            raise ValueError("BER cargo count differs from decoded RDV")
+            raise RDVStructureError("BER cargo count differs from decoded RDV", {"election_position": election_index,
+                "decoded_cargo_count": len(election_value["votosCargos"]), "ber_cargo_count": len(echildren[cargo_child_index].children) if len(echildren) > cargo_child_index else None})
         cargo_nodes = echildren[cargo_child_index].children
         cargos = []
         for cargo_index, (cargo_value, cargo_node) in enumerate(zip(election_value["votosCargos"], cargo_nodes), 1):
             cchildren = cargo_node.children
             if len(cchildren) != 3 or len(cchildren[2].children) != len(cargo_value["votos"]):
-                raise ValueError("BER vote count differs from decoded RDV")
+                raise RDVStructureError("BER vote count differs from decoded RDV", {"election_position": election_index,
+                    "cargo_position": cargo_index, "decoded_record_count": len(cargo_value["votos"]),
+                    "ber_record_count": len(cchildren[2].children) if len(cchildren) > 2 else None})
             cargo_key = _cargo_key(cargo_value["idCargo"])
             votes = []
             type_counts: Counter[str] = Counter()
@@ -221,7 +237,8 @@ def decode_rdv(rdv_path: Path, collection_path: Path, schema_path: Path, bu: dic
                 except Exception as error:
                     raise ValueError(f"vote BER record cannot be independently decoded: {error}") from error
                 if roundtrip != vote:
-                    raise ValueError("vote BER record differs from parent decoded value")
+                    raise RDVStructureError("vote BER record differs from parent decoded value", {"election_position": election_index,
+                        "cargo_position": cargo_index, "record_position": position, "byte_offset": node.start})
                 vote_type = vote["tipoVoto"]
                 digitacao = vote.get("digitacao")
                 type_counts[vote_type] += 1
@@ -303,6 +320,55 @@ def decode_rdv(rdv_path: Path, collection_path: Path, schema_path: Path, bu: dic
         "individual_record_join_policy": "RDV records are not associated with electors, enablement times, or log events",
         "elections": elections, "reconciliation_with_bu": reconciliation,
     }
+
+
+def diagnose_rdv_failure(rdv_path: Path, collection: dict, error: BaseException,
+                         collection_root: Path | None = None) -> dict:
+    section = collection.get("section_key")
+    files = collection.get("files", [])
+    metadata = next((item for item in files if item.get("type") == "rdv" and
+        (item.get("name") == rdv_path.name and (collection_root is None or
+         (collection_root / item.get("relative_path", "")).resolve() == rdv_path.resolve()))), {})
+    try:
+        raw = rdv_path.read_bytes()
+    except OSError:
+        raw = b""
+    message = str(error)
+    lowered = message.lower()
+    if "hash" in lowered or "integrity" in lowered:
+        error_type, code, stage = "integrity", "RDV_INTEGRITY_MISMATCH", "integrity_validation"
+    elif "encrypted" in lowered or "cifrad" in lowered:
+        error_type, code, stage = "decryption", "RDV_ENCRYPTED_UNSUPPORTED", "decryption"
+    elif "section identity" in lowered:
+        error_type, code, stage = "semantic_validation", "RDV_SECTION_IDENTITY_MISMATCH", "semantic_validation"
+    elif "unsupported" in lowered or "choice tag" in lowered or "not rdv" in lowered:
+        error_type, code, stage = "format_incompatibility", "RDV_FORMAT_UNSUPPORTED", "format_detection"
+    elif isinstance(error, BERParseError):
+        error_type, code, stage = "parsing", "RDV_BER_INVALID", "ber_parsing"
+    elif "trailing bytes" in lowered or "count differs" in lowered or "boundary" in lowered:
+        error_type, code, stage = "parsing", "RDV_STRUCTURE_INCONSISTENT", "structure_validation"
+    elif isinstance(error, (ValueError, TypeError)):
+        error_type, code, stage = "decoding", "RDV_ASN1_DECODE_FAILED", "asn1_decoding"
+    else:
+        error_type, code, stage = "internal", "RDV_PROCESSING_FAILED", "rdv_processing"
+    format_detected = "BER/ASN.1" if raw else "unknown"
+    position = {"byte_offset": error.offset} if isinstance(error, BERParseError) else getattr(error, "position", {})
+    diag = diagnostic(code=code, stage=stage, operation="decode_rdv", error_type=error_type,
+        cause=message, recoverability="permanent" if error_type in {"format_incompatibility", "parsing", "semantic_validation"} else "indeterminate",
+        section=section, file_type="rdv", file_name=rdv_path.name, file_path=str(rdv_path), exception=error,
+        position=position, detected_format=format_detected, version=RDV_SCHEMA_SHA256,
+        context={"size_bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest() if raw else None,
+                 "schema_version_or_hash": RDV_SCHEMA_SHA256, "manifest_hash": metadata.get("manifest_hash")})
+    return {"status": "failed", "format_variant": None,
+        "source": {"file_name": rdv_path.name, "relative_path": metadata.get("relative_path"),
+                   "sha256": hashlib.sha256(raw).hexdigest() if raw else None, "size_bytes": len(raw),
+                   "raw_file_preserved_separately": rdv_path.exists()},
+        "partial_interpretation": {"format_detected": format_detected,
+            "first_ber_tag_hex": raw[:1].hex() if raw else None,
+            "bytes_read": len(raw), "complete_structural_decode": False},
+        "integrity": {"sha256_matches_acquisition_manifest": bool(metadata) and hashlib.sha256(raw).hexdigest() == metadata.get("sha256"),
+                      "asn1_decode": "failed"},
+        "diagnostics": [diag]}
 
 
 def reconcile(elections: list[dict], bu: dict) -> dict:

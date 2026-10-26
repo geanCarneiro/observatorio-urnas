@@ -8,7 +8,7 @@ from pathlib import Path
 import asn1tools
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from rdv import decode_rdv
+from rdv import decode_rdv, diagnose_rdv_failure
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -127,6 +127,17 @@ class RDVDecoderTests(unittest.TestCase):
         report = decode_rdv(self.rdv, self.collection, self.schema, self.bu)
         self.assertEqual(report["format_variant"], "EntidadeEnvelopeGenerico->EntidadeRegistroDigitalVoto")
         self.assertEqual(report["entity_metadata"]["envelope"]["tipoEnvelope"], "envelopeRegistroDigitalVoto")
+
+        envelope["seguranca"] = {"idTipoArquivo": 1, "idCriptografia": 1, "idArquivoCD": 1, "idArquivoChave": b"fixture-key"}
+        encrypted = bu_spec.encode("EntidadeEnvelopeGenerico", envelope)
+        self.rdv.write_bytes(encrypted)
+        data["files"][0]["sha256"] = hashlib.sha256(encrypted).hexdigest()
+        data["files"][0]["size_bytes"] = len(encrypted)
+        self.collection.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError, "encrypted RDV envelope") as caught:
+            decode_rdv(self.rdv, self.collection, self.schema, self.bu)
+        failure = diagnose_rdv_failure(self.rdv, json.loads(self.collection.read_text()), caught.exception, self.root)
+        self.assertEqual(failure["diagnostics"][0]["error_type"], "decryption")
 
 
 if __name__ == "__main__":

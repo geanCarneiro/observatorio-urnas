@@ -10,6 +10,8 @@ import re
 import zipfile
 import asn1tools
 from rdv import decode_rdv
+from rdv import diagnose_rdv_failure
+from diagnostics import diagnostic, file_state, sha256_file, summarize_diagnostics
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +29,15 @@ DEFAULT_CUTS = ("17:00", "17:15", "17:30", "17:45", "18:00", "18:30", "19:00")
 BU_SCHEMA_SOURCE = "https://www.tse.jus.br/eleicoes/eleicoes-2026-content/arquivos/formato-arquivos-de-bu-rdv-e-assinatura-digital"
 BU_SCHEMA_BUNDLE_SHA256 = "b5ac413e81121d53de2bb1657af611f84a45fdc84388e9d9821872994bbfbafd"
 BU_SCHEMA_SHA256 = "ef64bf723f774403b423ed0b617f5a83a3f50c0023d0003e18cd29170404ab81"
+RDV_SCHEMA_SHA256 = "282dcde0c7ba1f1bb128fe27443ad8d18f7490416c9546d033910a7ec557a465"
+
+
+class BUProcessingError(ValueError):
+    def __init__(self, code: str, stage: str, error_type: str, cause: str, original: BaseException,
+                 context: dict | None = None, recoverability: str = "permanent"):
+        super().__init__(cause)
+        self.code, self.stage, self.error_type = code, stage, error_type
+        self.original, self.context, self.recoverability = original, context or {}, recoverability
 
 
 def parse_cuts(values: list[str]) -> list[str]:
@@ -45,10 +56,41 @@ def sha256(path: Path) -> str:
 
 
 def decode_bu(bu_path: Path, schema_path: Path) -> dict:
-    spec = asn1tools.compile_files(str(schema_path), codec="ber")
-    envelope = spec.decode("EntidadeEnvelopeGenerico", bu_path.read_bytes())
-    bu = spec.decode("EntidadeBoletimUrna", envelope["conteudo"])
-    election_date = datetime.strptime(bu["dataHoraEmissao"], "%Y%m%dT%H%M%S").strftime("%Y-%m-%d")
+    raw = bu_path.read_bytes()
+    try:
+        spec = asn1tools.compile_files(str(schema_path), codec="ber")
+    except Exception as error:
+        raise BUProcessingError("BU_SCHEMA_COMPILE_FAILED", "schema_load", "internal",
+            "The configured BU ASN.1 schema could not be loaded.", error,
+            {"schema_path": str(schema_path), "schema_sha256": sha256_file(schema_path) if schema_path.exists() else None},
+            "indeterminate") from error
+    try:
+        envelope = spec.decode("EntidadeEnvelopeGenerico", raw)
+    except Exception as error:
+        raise BUProcessingError("BU_ENVELOPE_DECODE_FAILED", "asn1_envelope_decode", "decoding",
+            "The file could not be decoded as the official generic ASN.1 envelope.", error,
+            {"bytes_read": len(raw), "first_tag_hex": raw[:1].hex() if raw else None}) from error
+    if envelope.get("tipoEnvelope") != "envelopeBoletimUrna":
+        error = ValueError(f"expected envelopeBoletimUrna, received {envelope.get('tipoEnvelope')}")
+        raise BUProcessingError("BU_ENVELOPE_TYPE_UNSUPPORTED", "format_validation", "format_incompatibility",
+            str(error), error, {"detected_envelope_type": envelope.get("tipoEnvelope")})
+    if "seguranca" in envelope:
+        error = ValueError("BU envelope includes security/encryption metadata but no decryption key is configured")
+        raise BUProcessingError("BU_ENCRYPTED_UNSUPPORTED", "decryption", "decryption", str(error), error,
+            {"envelope_metadata_decoded": True, "encrypted_content_bytes": len(envelope.get("conteudo", b""))}, "indeterminate")
+    try:
+        bu = spec.decode("EntidadeBoletimUrna", envelope["conteudo"])
+    except Exception as error:
+        raise BUProcessingError("BU_CONTENT_DECODE_FAILED", "asn1_content_decode", "decoding",
+            "The envelope was decoded, but its content did not match EntidadeBoletimUrna.", error,
+            {"envelope_type": envelope["tipoEnvelope"], "content_bytes": len(envelope.get("conteudo", b"")),
+             "envelope_partial_interpretation": {key: value for key, value in envelope.items() if key != "conteudo"}}) from error
+    try:
+        election_date = datetime.strptime(bu["dataHoraEmissao"], "%Y%m%dT%H%M%S").strftime("%Y-%m-%d")
+    except (ValueError, TypeError) as error:
+        raise BUProcessingError("BU_EMISSION_TIMESTAMP_INVALID", "semantic_validation", "semantic_validation",
+            "BU dataHoraEmissao does not match the official YYYYMMDDThhmmss form.", error,
+            {"dataHoraEmissao": bu.get("dataHoraEmissao"), "bu_content_decoded": True}) from error
     section_data = bu["dadosSecaoSA"]
     if section_data[0] != "dadosSecao":
         section_times = None
@@ -195,6 +237,348 @@ def analyze(log_path: Path, bu_path: Path, collection_path: Path, cuts: list[str
         "habilitacoes_vs_bu_attendance": {"log": event_counts.get("habilitacao", 0), "bu": bu["qtd_eleitores_compareceram"]},
         "votos_computados_vs_bu_attendance": {"log": event_counts.get("voto_computado", 0), "bu": bu["qtd_eleitores_compareceram"]},
     }
+
+
+def process_log_file(path: Path, metadata: dict, section: str, cuts: list[str]) -> dict:
+    diagnostics = []
+    events = []
+    counts = Counter()
+    after_cuts = Counter()
+    file_hash = sha256_file(path)
+    if file_hash != metadata.get("sha256"):
+        diagnostics.append(diagnostic(code="LOG_SHA256_MISMATCH", stage="integrity_validation", operation="verify_sha256",
+            error_type="integrity", cause="Downloaded bytes differ from acquisition metadata.", recoverability="permanent",
+            section=section, file_type="log", file_name=path.name, file_path=str(path), detected_format="ZIP",
+            context={"expected_sha256": metadata.get("sha256"), "observed_sha256": file_hash}))
+    try:
+        archive = zipfile.ZipFile(path)
+    except (zipfile.BadZipFile, OSError, EOFError) as error:
+        diagnostics.append(diagnostic(code="LOG_ZIP_OPEN_FAILED", stage="decompression", operation="open_zip",
+            error_type="decompression", cause=str(error), recoverability="permanent", section=section,
+            file_type="log", file_name=path.name, file_path=str(path), exception=error, detected_format="ZIP",
+            context={"size_bytes": path.stat().st_size, "sha256": file_hash}))
+        return {"status": "failed", "events": events, "diagnostics": diagnostics, "event_counts": {}}
+    with archive:
+        if "logd.dat" not in archive.namelist():
+            error = ValueError("ZIP has no logd.dat member")
+            diagnostics.append(diagnostic(code="LOG_MEMBER_MISSING", stage="format_validation", operation="locate_log_member",
+                error_type="format_incompatibility", cause=str(error), recoverability="permanent", section=section,
+                file_type="log", file_name=path.name, file_path=str(path), exception=error, detected_format="ZIP",
+                context={"members": archive.namelist()}))
+            return {"status": "failed", "events": events, "diagnostics": diagnostics, "event_counts": {}}
+        member = archive.getinfo("logd.dat")
+        if member.file_size > 32 * 1024 * 1024:
+            error = ValueError("logd.dat exceeds the 32 MiB safety limit")
+            diagnostics.append(diagnostic(code="LOG_MEMBER_SIZE_LIMIT", stage="semantic_validation", operation="check_member_size",
+                error_type="semantic_validation", cause=str(error), recoverability="permanent", section=section,
+                file_type="log", file_name=path.name, file_path=str(path), exception=error, detected_format="ZIP",
+                context={"member": "logd.dat", "declared_bytes": member.file_size, "limit_bytes": 32 * 1024 * 1024}))
+            return {"status": "failed", "events": events, "diagnostics": diagnostics, "event_counts": {}}
+        try:
+            bad_member = archive.testzip()
+            if bad_member:
+                error = ValueError(f"ZIP CRC validation failed for {bad_member}")
+                diagnostics.append(diagnostic(code="LOG_ZIP_CRC_FAILED", stage="integrity_validation", operation="test_zip_crc",
+                    error_type="decompression", cause=str(error), recoverability="permanent", section=section,
+                    file_type="log", file_name=path.name, file_path=str(path), exception=error, detected_format="ZIP",
+                    context={"member": bad_member, "member_count": len(archive.namelist())}))
+                return {"status": "failed", "events": events, "diagnostics": diagnostics, "event_counts": {}}
+            text_data = archive.read("logd.dat").decode("latin1")
+        except (zipfile.BadZipFile, OSError, EOFError, RuntimeError) as error:
+            diagnostics.append(diagnostic(code="LOG_DECOMPRESSION_FAILED", stage="decompression", operation="read_log_member",
+                error_type="decompression", cause=str(error), recoverability="permanent", section=section,
+                file_type="log", file_name=path.name, file_path=str(path), exception=error, detected_format="ZIP",
+                context={"member": "logd.dat", "declared_bytes": member.file_size}))
+            return {"status": "failed", "events": events, "diagnostics": diagnostics, "event_counts": {}}
+    substitution_matches = 0
+    for line_number, raw_line in enumerate(text_data.splitlines(), 1):
+        fields = raw_line.split("\t")
+        if len(fields) < 5:
+            diagnostics.append(diagnostic(code="LOG_LINE_MALFORMED", stage="parsing", operation="parse_log_record",
+                error_type="parsing", cause=f"Expected at least five tab-separated fields, found {len(fields)}.",
+                recoverability="permanent", section=section, file_type="log", file_name=path.name, file_path=str(path),
+                position={"line": line_number}, detected_format="ZIP/logd.dat", context={"field_count": len(fields)}))
+            continue
+        message = fields[4]
+        message_lower = message.lower()
+        if any(term in message_lower for term in ("contingência", "substituição", "urna substituta", "troca de urna", "recuperação dos dados")):
+            substitution_matches += 1
+        event_type = EVENTS.get(message)
+        if event_type is None:
+            continue
+        try:
+            timestamp = datetime.strptime(fields[0], "%d/%m/%Y %H:%M:%S")
+        except ValueError as error:
+            diagnostics.append(diagnostic(code="LOG_EVENT_TIMESTAMP_INVALID", stage="parsing", operation="parse_event_timestamp",
+                error_type="parsing", cause=str(error), recoverability="permanent", section=section,
+                file_type="log", file_name=path.name, file_path=str(path), exception=error,
+                position={"line": line_number}, detected_format="ZIP/logd.dat", context={"event_type": event_type, "timestamp_raw": fields[0]}))
+            continue
+        hhmm = timestamp.strftime("%H:%M")
+        events.append({"source_file_sha256": metadata["sha256"], "line_number": line_number,
+            "event_type": event_type, "event_timestamp_raw": fields[0], "event_timezone": "unknown",
+            "event_timestamp_utc": None, "event_timestamp_brt": None, "parser_status": "allowlist_match"})
+        counts[event_type] += 1
+        if event_type in {"habilitacao", "voto_computado", "voto_confirmado_governador", "voto_confirmado_presidente"}:
+            for cut in cuts:
+                if hhmm >= cut:
+                    after_cuts[f"{event_type}_a_partir_de_{cut.replace(':', 'h')}"] += 1
+    return {"status": "processed_with_diagnostics" if diagnostics else "processed", "events": events,
+        "diagnostics": diagnostics, "event_counts": dict(counts), "activity_after_clock_cuts": dict(after_cuts),
+        "substitution_keyword_matches": substitution_matches, "sha256": file_hash,
+        "size_bytes": path.stat().st_size, "detected_format": "ZIP", "version": None, "urn_model": None}
+
+
+def log_bu_reconciliation_diagnostics(validation: dict, section: str, log_path: Path,
+                                      urn_model: str | None = None) -> list[dict]:
+    diagnostics = []
+    reconciliation = validation.get("bu_reconciliation", {})
+    comparisons = list(reconciliation.get("by_attendance_metric", {}).values())
+    comparisons.extend(reconciliation.get("by_cargo", []))
+    for comparison in comparisons:
+        if "log_confirmations" in comparison and comparison.get("log_confirmations") is None:
+            diagnostics.append(diagnostic(code="LOG_BU_RECONCILIATION_INCOMPLETE", stage="reconciliation",
+                operation="map_log_event_to_bu_cargo", error_type="reconciliation",
+                cause="No allowlisted log event is mapped to this BU cargo.", recoverability="indeterminate",
+                section=section, file_type="log", file_name=log_path.name, file_path=str(log_path),
+                detected_format="ZIP/logd.dat", urn_model=urn_model, context={"comparison": comparison}))
+            continue
+        divergences = {key: value for key, value in comparison.items()
+                       if key.startswith("divergence_") and value not in (None, 0)}
+        if not divergences:
+            continue
+        diagnostics.append(diagnostic(code="LOG_BU_RECONCILIATION_DIVERGENCE", stage="reconciliation",
+            operation="reconcile_log_bu", error_type="reconciliation",
+            cause="Log event counts differ from BU attendance or vote totals.", recoverability="indeterminate",
+            section=section, file_type="log", file_name=log_path.name, file_path=str(log_path),
+            detected_format="ZIP/logd.dat", urn_model=urn_model, context={"comparison": comparison, "divergences": divergences}))
+    return diagnostics
+
+
+def analyze_collection(collection_path: Path, cuts: list[str], bu_schema_path: Path,
+                       rdv_schema_path: Path, selected_logs: list[Path] | None = None,
+                       selected_bus: list[Path] | None = None) -> dict:
+    collection = json.loads(collection_path.read_text(encoding="utf-8"))
+    section = collection.get("section_key")
+    entries = collection.get("files", [])
+    priority = {"bu": 0, "log": 1, "rdv": 2}
+    entries = sorted(entries, key=lambda entry: priority.get(entry.get("type"), 3))
+    log_filter = {path.resolve() for path in selected_logs or []}
+    bu_filter = {path.resolve() for path in selected_bus or []}
+    if log_filter:
+        entries = [item for item in entries if item.get("type") != "log" or
+                   (collection_path.parent / item.get("relative_path", "")).resolve() in log_filter]
+    if bu_filter:
+        entries = [item for item in entries if item.get("type") != "bu" or
+                   (collection_path.parent / item.get("relative_path", "")).resolve() in bu_filter]
+    diagnostics = list(collection.get("diagnostics", []))
+    states = list(collection.get("file_states", []))
+    manifest_path = collection_path.parent / "manifest.aux.jws"
+    signature_codes = {item.get("code") for item in diagnostics if item.get("error_type") == "signature_cryptographic"}
+    if collection.get("signature_status") != "verified" and not signature_codes:
+        diagnostics.append(diagnostic(code="JWS_SIGNATURE_NOT_PROCESSED", stage="integrity_validation",
+            operation="verify_jws_signature", error_type="signature_cryptographic",
+            cause="Cryptographic verification has not been completed with a trusted TSE key.",
+            recoverability="indeterminate", section=section, file_type="jws", file_name=manifest_path.name,
+            file_path=str(manifest_path), detected_format="JWS compact", context={"verification_status": "not_processed"}))
+    if manifest_path.exists() and collection.get("manifest_sha256"):
+        observed_manifest_hash = sha256_file(manifest_path)
+        if observed_manifest_hash != collection["manifest_sha256"]:
+            diagnostics.append(diagnostic(code="JWS_SHA256_MISMATCH", stage="integrity_validation", operation="verify_sha256",
+                error_type="integrity", cause="Preserved manifest bytes differ from collection metadata.",
+                recoverability="permanent", section=section, file_type="jws", file_name=manifest_path.name,
+                file_path=str(manifest_path), detected_format="JWS compact",
+                context={"expected_sha256": collection["manifest_sha256"], "observed_sha256": observed_manifest_hash}))
+    elif not manifest_path.exists() and not any(item.get("type") == "jws" for item in states):
+        diagnostics.append(diagnostic(code="ANALYZE_JWS_SOURCE_MISSING", stage="analysis_input", operation="load_manifest_bytes",
+            error_type="missing", cause="Preserved JWS bytes are missing from the acquisition directory.",
+            recoverability="indeterminate", section=section, file_type="jws", file_name=manifest_path.name,
+            file_path=str(manifest_path), detected_format="JWS compact"))
+        states.append(file_state(file_type="jws", name=manifest_path.name, section=section, status="missing",
+            reason="Preserved JWS bytes are missing.", path=str(manifest_path)))
+    processed = []
+    log_results = []
+    bu_results = []
+    rdv_results = []
+    for item in entries:
+        file_type = item.get("type")
+        if file_type not in {"bu", "rdv", "log"}:
+            continue
+        relative_path = item.get("relative_path")
+        if not relative_path:
+            diagnostics.append(diagnostic(code=f"ANALYZE_{str(file_type).upper()}_PATH_MISSING", stage="analysis_input",
+                operation="resolve_acquired_file", error_type="missing", cause="Acquisition metadata has no relative path.",
+                recoverability="indeterminate", section=section, file_type=file_type, file_name=item.get("name"),
+                context={"manifest_hash": item.get("manifest_hash")}))
+            states.append(file_state(file_type=file_type, name=item.get("name"), section=section, status="not_processed",
+                reason="No relative path was recorded."))
+            continue
+        path = collection_path.parent / relative_path
+        if not path.exists():
+            missing_diag = diagnostic(code=f"ANALYZE_{str(file_type).upper()}_SOURCE_MISSING", stage="analysis_input",
+                operation="load_acquired_file", error_type="missing", cause="Manifest-listed input file is not present in the acquisition directory.",
+                recoverability="indeterminate", section=section, file_type=file_type, file_name=item.get("name"),
+                file_path=str(path), detected_format=Path(item.get("name", "")).suffix.lstrip("."),
+                context={"relative_path": item.get("relative_path"), "manifest_hash": item.get("manifest_hash")})
+            diagnostics.append(missing_diag)
+            states.append(file_state(file_type=file_type, name=item.get("name"), section=section, status="missing",
+                reason=missing_diag["cause"], path=str(path)))
+            continue
+        if file_type == "log":
+            try:
+                result = process_log_file(path, item, section, cuts)
+            except Exception as error:
+                diag = diagnostic(code="LOG_PROCESSING_FAILED", stage="log_processing", operation="process_log_file",
+                    error_type="internal", cause=str(error), recoverability="indeterminate", section=section,
+                    file_type="log", file_name=path.name, file_path=str(path), exception=error,
+                    detected_format="ZIP/unknown", context={"bytes_read": path.stat().st_size if path.exists() else 0})
+                result = {"status": "failed", "events": [], "diagnostics": [diag], "event_counts": {},
+                    "sha256": sha256_file(path) if path.exists() else None,
+                    "size_bytes": path.stat().st_size if path.exists() else None}
+            result.update({"type": file_type, "name": item.get("name"), "path": str(path)})
+            log_results.append(result)
+            diagnostics.extend(result["diagnostics"])
+            states.append(file_state(file_type=file_type, name=item.get("name"), section=section, status=result["status"],
+                path=str(path), detected_format=result.get("detected_format"), version=result.get("version"),
+                urn_model=result.get("urn_model"), sha256=result.get("sha256"), size_bytes=result.get("size_bytes")))
+            if result["status"].startswith("processed"):
+                processed.append(file_type)
+        elif file_type == "bu":
+            try:
+                file_hash = sha256_file(path)
+                data = decode_bu(path, bu_schema_path)
+                bu_result = {"status": "processed", "type": file_type, "name": item.get("name"), "path": str(path),
+                    "sha256": file_hash, "size_bytes": path.stat().st_size, "detected_format": "ASN.1 BER",
+                    "version": BU_SCHEMA_SHA256, "urn_model": data.get("urn_type"), "data": data}
+                if item.get("sha256") != file_hash:
+                    diag = diagnostic(code="BU_SHA256_MISMATCH", stage="integrity_validation", operation="verify_sha256",
+                        error_type="integrity", cause="Downloaded bytes differ from acquisition metadata.", recoverability="permanent",
+                        section=section, file_type="bu", file_name=path.name, file_path=str(path), detected_format="ASN.1 BER",
+                        version=BU_SCHEMA_SHA256, urn_model=data.get("urn_type"), context={"expected_sha256": item.get("sha256"), "observed_sha256": file_hash})
+                    diagnostics.append(diag)
+                    bu_result["status"] = "processed_with_diagnostics"
+                expected = section.split("/") if isinstance(section, str) else []
+                identity = data["section"]
+                municipality_zone = identity["municipioZona"]
+                if len(expected) == 4 and (str(municipality_zone["municipio"]) != expected[1] or f'{municipality_zone["zona"]:04d}' != expected[2] or f'{identity["secao"]:04d}' != expected[3]):
+                    diagnostics.append(diagnostic(code="BU_SECTION_IDENTITY_MISMATCH", stage="semantic_validation", operation="validate_section_identity",
+                        error_type="semantic_validation", cause="Decoded BU identity does not match collection section key.", recoverability="permanent",
+                        section=section, file_type="bu", file_name=path.name, file_path=str(path), detected_format="ASN.1 BER",
+                        version=BU_SCHEMA_SHA256, urn_model=data.get("urn_type"), context={"expected_section": section, "decoded_section": identity}))
+                    bu_result["status"] = "processed_with_diagnostics"
+                bu_results.append(bu_result)
+                processed.append(file_type)
+                states.append(file_state(file_type=file_type, name=item.get("name"), section=section, status=bu_result["status"],
+                    path=str(path), detected_format="ASN.1 BER", version=BU_SCHEMA_SHA256, urn_model=data.get("urn_type"),
+                    sha256=file_hash, size_bytes=path.stat().st_size))
+            except Exception as error:
+                if isinstance(error, BUProcessingError):
+                    code, stage, error_type = error.code, error.stage, error.error_type
+                    cause, recoverability, original, context = str(error), error.recoverability, error.original, error.context
+                else:
+                    code, stage, error_type = "BU_PROCESSING_FAILED", "bu_processing", "internal"
+                    cause, recoverability, original, context = str(error), "indeterminate", error, {}
+                diagnostics.append(diagnostic(code=code, stage=stage, operation="decode_bu",
+                    error_type=error_type, cause=cause, recoverability=recoverability, section=section, file_type="bu",
+                    file_name=path.name, file_path=str(path), exception=original, detected_format="ASN.1 BER/unknown",
+                    version=BU_SCHEMA_SHA256, context={**context, "size_bytes": path.stat().st_size, "sha256": sha256_file(path),
+                        "partial_interpretation": context.get("envelope_partial_interpretation", {"bytes_read": path.stat().st_size, "complete_structural_decode": False})}))
+                bu_results.append({"status": "failed", "type": file_type, "name": item.get("name"), "path": str(path),
+                    "sha256": sha256_file(path), "size_bytes": path.stat().st_size,
+                    "partial_interpretation": {"format_detected": "ASN.1 BER/unknown", "bytes_read": path.stat().st_size, "complete_structural_decode": False}})
+                states.append(file_state(file_type=file_type, name=item.get("name"), section=section, status="failed", path=str(path),
+                    detected_format="ASN.1 BER/unknown", version=BU_SCHEMA_SHA256, sha256=sha256_file(path), size_bytes=path.stat().st_size))
+        else:
+            bu_for_rdv_result = None
+            try:
+                bu_for_rdv_result = next((item for item in bu_results if item.get("data")), None)
+                bu_for_rdv = bu_for_rdv_result.get("data") if bu_for_rdv_result else None
+                result = decode_rdv(path, collection_path, rdv_schema_path, bu_for_rdv)
+            except Exception as error:
+                result = diagnose_rdv_failure(path, collection, error, collection_path.parent)
+            result.update({"type": file_type, "name": item.get("name"), "path": str(path)})
+            rdv_results.append(result)
+            diagnostics.extend(result.get("diagnostics", []))
+            states.append(file_state(file_type=file_type, name=item.get("name"), section=section, status=result.get("status", "failed"),
+                path=str(path), detected_format=result.get("source", {}).get("format_variant") or result.get("partial_interpretation", {}).get("format_detected"),
+                version=RDV_SCHEMA_SHA256, urn_model=bu_for_rdv_result.get("urn_model") if bu_for_rdv_result else None,
+                sha256=result.get("source", {}).get("sha256"), size_bytes=result.get("source", {}).get("size_bytes")))
+            if result.get("status") == "decoded":
+                processed.append(file_type)
+
+    # Carry forward explicit absence/applicability states from acquisition; analyzer inputs missing from disk are added above.
+    file_types = {state.get("type") for state in states}
+    for file_type in ("jws", "bu", "rdv", "log", "vota.vsc", "signature_verification"):
+        if file_type not in file_types:
+            status = "not_processed" if file_type == "signature_verification" else "missing"
+            states.append(file_state(file_type=file_type, name=None, section=section, status=status,
+                reason="No acquisition state was recorded for this type."))
+
+    legacy_report = None
+    first_log = next((Path(item["path"]) for item in log_results if item["status"].startswith("processed")), None)
+    first_bu = next((Path(item["path"]) for item in bu_results if item.get("data")), None)
+    if first_log and first_bu:
+        try:
+            legacy_report = analyze(first_log, first_bu, collection_path, cuts, bu_schema_path)
+            diagnostics.extend(log_bu_reconciliation_diagnostics(legacy_report["validation"], section, first_log,
+                legacy_report["bu_attendance"].get("urn_type")))
+            if not legacy_report["validation"].get("bu_attendance_detail_sum_matches", True):
+                diagnostics.append(diagnostic(code="BU_ATTENDANCE_DETAIL_RECONCILIATION_DIVERGENCE", stage="reconciliation",
+                    operation="reconcile_bu_attendance_fields", error_type="reconciliation",
+                    cause="BU detailed attendance fields do not sum to its attendance total.", recoverability="indeterminate",
+                    section=section, file_type="bu", file_name=first_bu.name, file_path=str(first_bu),
+                    detected_format="ASN.1 BER", version=BU_SCHEMA_SHA256,
+                    urn_model=legacy_report["bu_attendance"].get("urn_type"), context=legacy_report["bu_attendance"]))
+        except Exception as error:
+            diagnostics.append(diagnostic(code="CROSS_ANALYSIS_FAILED", stage="reconciliation", operation="analyze_log_bu_pair",
+                error_type="internal", cause=str(error), recoverability="indeterminate", section=section,
+                file_type=None, file_name=None, file_path=None, exception=error, context={"log": str(first_log), "bu": str(first_bu)}))
+    for rdv in rdv_results:
+        recon = rdv.get("reconciliation_with_bu", {})
+        if recon.get("status") == "partial" and not recon.get("by_cargo"):
+            diagnostics.append(diagnostic(code="RDV_BU_RECONCILIATION_NOT_RUN", stage="reconciliation",
+                operation="reconcile_rdv_bu", error_type="reconciliation",
+                cause="No comparable election/cargo rows were available for RDV-to-BU reconciliation.",
+                recoverability="indeterminate", section=section, file_type="rdv", file_name=rdv.get("name"),
+                file_path=rdv.get("path"), detected_format=rdv.get("format_variant"), version=RDV_SCHEMA_SHA256,
+                urn_model=next((item.get("urn_model") for item in bu_results if item.get("data")), None),
+                context={"reconciliation_status": "partial"}))
+        for comparison in recon.get("by_cargo", []):
+            if comparison.get("status") == "no_matching_bu_cargo":
+                diagnostics.append(diagnostic(code="RDV_BU_CARGO_UNMATCHED", stage="reconciliation",
+                    operation="match_rdv_cargo_to_bu", error_type="reconciliation",
+                    cause="RDV cargo has no matching election/cargo key in any successfully decoded BU.",
+                    recoverability="indeterminate", section=section, file_type="rdv", file_name=rdv.get("name"),
+                    file_path=rdv.get("path"), detected_format=rdv.get("format_variant"), version=RDV_SCHEMA_SHA256,
+                    urn_model=bu_results[0].get("urn_model") if bu_results else None, context=comparison))
+        if recon.get("status") == "divergence":
+            for comparison in recon.get("by_cargo", []):
+                if comparison.get("status") == "divergence":
+                    diagnostics.append(diagnostic(code="RDV_BU_RECONCILIATION_DIVERGENCE", stage="reconciliation", operation="reconcile_rdv_bu",
+                        error_type="reconciliation", cause="RDV vote totals or comparable subtotals differ from the BU.", recoverability="indeterminate",
+                        section=section, file_type="rdv", file_name=rdv.get("name"), file_path=rdv.get("path"),
+                        detected_format=rdv.get("format_variant"), version=RDV_SCHEMA_SHA256,
+                        urn_model=bu_results[0].get("urn_model") if bu_results else None, context=comparison))
+
+    diagnostics.extend([])
+    successful = [result for result in log_results if result.get("status", "").startswith("processed")]
+    successful.extend(result for result in bu_results + rdv_results if result.get("status") in {"processed", "decoded"})
+    overall_status = "complete" if not diagnostics and successful and all(state.get("status") in {"processed", "downloaded", "decoded"} for state in states if state.get("type") in {"jws", "bu", "rdv", "log"}) else "partial" if successful else "failed"
+    validity = "valid" if overall_status == "complete" and not diagnostics else "not_valid" if overall_status == "failed" else "not_validated"
+    report = legacy_report or {"report_schema_version": 4, "section_key": section, "acquisition_id": collection.get("acquired_at_utc")}
+    report.update({"report_schema_version": 4, "overall_status": overall_status, "validity": validity,
+        "source_files": {"manifest_sha256": collection.get("manifest_sha256"),
+            "log_sha256": [item.get("sha256") for item in log_results], "bu_sha256": [item.get("sha256") for item in bu_results],
+            "rdv_sha256": [item.get("source", {}).get("sha256") for item in rdv_results]},
+        "file_processing": {"logs": log_results, "bus": bu_results, "rdvs": rdv_results,
+            "states": states, "unprocessed_types": [s["type"] for s in states if s.get("status") == "not_processed"]},
+        "rdv_files": rdv_results, "diagnostics": diagnostics,
+        "diagnostic_summary": summarize_diagnostics(diagnostics, states),
+        "reconciliation": {"log_bu": (legacy_report or {}).get("validation", {}).get("bu_reconciliation"),
+            "rdv_bu": [item.get("reconciliation_with_bu") for item in rdv_results]},
+        "preservation": {"original_files_retained": True, "partial_files_retained": True,
+            "note": "Processing outcomes never upgrade a partial or unverified input to valid."}})
+    return report
     for comparison in attendance_comparisons.values():
         comparison["divergence_log_minus_bu"] = comparison["log"] - comparison["bu"]
     cargo_event = {"presidente": "voto_confirmado_presidente", "governador": "voto_confirmado_governador"}
@@ -252,7 +636,7 @@ def analyze(log_path: Path, bu_path: Path, collection_path: Path, cuts: list[str
         "jws_signature": "unverified",
     }
     return {
-        "report_schema_version": 3,
+        "report_schema_version": 4,
         "section_key": collection["section_key"],
         "acquisition_id": collection["acquired_at_utc"],
         "source_files": {"manifest_sha256": collection["manifest_sha256"], "log_sha256": metadata["sha256"], "bu_sha256": bu_metadata["sha256"],
@@ -287,20 +671,40 @@ def analyze(log_path: Path, bu_path: Path, collection_path: Path, cuts: list[str
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--log", required=True, type=Path)
-    parser.add_argument("--bu", required=True, type=Path)
+    parser.add_argument("--log", type=Path, action="append", help="limit analysis to this acquired log; repeatable")
+    parser.add_argument("--bu", type=Path, action="append", help="limit analysis to this acquired BU; repeatable")
     parser.add_argument("--collection", required=True, type=Path)
     parser.add_argument("--schema", type=Path, default=Path("schemas/bu.asn1"))
-    parser.add_argument("--rdv", type=Path, action="append", default=[], help="RDV file listed in the acquisition manifest; repeat for every RDV")
     parser.add_argument("--rdv-schema", type=Path, default=Path("schemas/rdv.asn1"))
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--cut", action="append", dest="cuts", help="clock cut HH:MM; repeatable; defaults to configured pilot cuts")
     args = parser.parse_args()
     cuts = parse_cuts(args.cuts or list(DEFAULT_CUTS))
-    report = analyze(args.log, args.bu, args.collection, cuts, args.schema, args.rdv, args.rdv_schema)
+    try:
+        report = analyze_collection(args.collection, cuts, args.schema, args.rdv_schema, args.log, args.bu)
+    except Exception as error:
+        section = None
+        try:
+            section = json.loads(args.collection.read_text(encoding="utf-8")).get("section_key")
+        except Exception:
+            pass
+        diag = diagnostic(code="ANALYZE_COLLECTION_FAILED", stage="analysis_input", operation="load_collection_manifest",
+            error_type="parsing", cause=str(error), recoverability="permanent", section=section,
+            file_type="collection", file_name=args.collection.name, file_path=str(args.collection), exception=error,
+            context={"collection_bytes": args.collection.stat().st_size if args.collection.exists() else 0})
+        failure_states = [file_state(file_type=kind, name=None, section=section, status="not_processed",
+            reason="Collection manifest could not be loaded.") for kind in ("bu", "rdv", "log")]
+        report = {"report_schema_version": 4, "section_key": section, "overall_status": "failed",
+            "validity": "not_valid", "diagnostics": [diag], "file_processing": {"states": [
+                *failure_states],
+                "logs": [], "bus": [], "rdvs": [], "unprocessed_types": ["bu", "rdv", "log"]},
+            "diagnostic_summary": summarize_diagnostics([diag], failure_states),
+            "preservation": {"original_files_retained": True, "partial_files_retained": True}}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps({"output": str(args.output), "section_key": report["section_key"], "event_count_total": report["event_count_total"], "validation": report["validation"]}, ensure_ascii=False))
+    print(json.dumps({"output": str(args.output), "section_key": report["section_key"],
+                      "overall_status": report["overall_status"], "validity": report["validity"],
+                      "diagnostic_count": report["diagnostic_summary"]["diagnostic_count"]}, ensure_ascii=False))
     return 0
 
 
