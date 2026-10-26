@@ -16,7 +16,7 @@ O mesmo coletor deve aceitar uma seção explícita para desenvolvimento e valid
 - O modo `section` exige os quatro identificadores e executa somente essa seção.
 - O modo `national` exige aprovação por proteção de ambiente do GitHub, usa inventário oficial congelado por versão/hash e divide a carga em lotes independentes com checkpoints externos duráveis.
 - Artefatos e resumos registram commit do código, versão do inventário, parâmetros, cobertura, horários, erros e hashes dos arquivos brutos.
-- Não publicar dados sensíveis de RDV ou `vota.vsc`; coleta desses formatos fica desativada até justificativa e revisão específicas.
+- O modo por seção pode coletar RDV: preservar original, manifesto e metadados de aquisição em artefato separado com retenção de 90 dias. O relatório inclui registros individuais e agregações. Não relacionar registros a eleitores, horários ou logs; não tratar posição como tempo nem como chave compartilhada entre cargos. `vota.vsc` segue fora da coleta.
 - A workflow será habilitada para execução nacional somente após medir duração, armazenamento, limites do Actions e taxa segura no piloto. Filesystem efêmero do runner não é checkpoint.
 
 ## Portões de validação

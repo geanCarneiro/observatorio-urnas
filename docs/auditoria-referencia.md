@@ -16,3 +16,26 @@ Próximo passo: implementação independente de uma prova de conceito por seçã
 A fonte compatível é o pacote **Formato dos arquivos de BU, RDV e assinatura digital**, publicado na página oficial das Eleições 2026 do TSE: `https://www.tse.jus.br/eleicoes/eleicoes-2026-content/arquivos/formato-arquivos-de-bu-rdv-e-assinatura-digital`. O ZIP observado tem SHA-256 `b5ac413e81121d53de2bb1657af611f84a45fdc84388e9d9821872994bbfbafd`; `spec/bu.asn1` tem SHA-256 `ef64bf723f774403b423ed0b617f5a83a3f50c0023d0003e18cd29170404ab81`. `schemas/bu.asn1` contém essa cópia oficial e o relatório verifica seu hash.
 
 O schema antigo usado no primeiro decoder divergia em campos do envelope `Carga`, comparecimento e resultados. A aplicação agora decodifica o envelope e o conteúdo com o schema oficial, confirma a identidade da seção, compara habilitações/votos com comparecimento e totais por cargo, registra diferenças numéricas e expõe o histórico de códigos de carga sem revelar os próprios códigos. A validação da assinatura do JWS e a determinação do fuso são controles separados; decodificar o payload não equivale a verificar a assinatura.
+
+## Esquema oficial do RDV 2026
+
+`schemas/rdv.asn1` é a cópia `spec/rdv.asn1` do mesmo pacote oficial. O SHA-256 do pacote ZIP é `b5ac413e81121d53de2bb1657af611f84a45fdc84388e9d9821872994bbfbafd`; o SHA-256 do schema RDV é `282dcde0c7ba1f1bb128fe27443ad8d18f7490416c9546d033910a7ec557a465`. Cada relatório registra os hashes observados e se a cópia coincide com a referência.
+
+O decoder aceita `EntidadeRegistroDigitalVoto` e `EntidadeResultadoRDV`, diretamente ou dentro de `EntidadeEnvelopeGenerico` com `tipoEnvelope=envelopeRegistroDigitalVoto`. Envelope com segurança/cifra não é decifrado: a análise falha explicitamente e o coletor já preservou os bytes originais. O RDV inteiro é retido sem alteração no diretório de aquisição; o relatório guarda o SHA-256 e tamanho e cada voto contém também seu TLV BER original em hexadecimal. A integridade estrutural é verificada pelo parser BER com limites estritos, e cada TLV de voto precisa decodificar novamente para o mesmo valor produzido pelo decoder ASN.1.
+
+| Campo oficial | Preservação e interpretação |
+| --- | --- |
+| `pleito`, `fase`, `identificacao` | Metadados do registro digital, fase e município/zona/local/seção conforme ASN.1. |
+| `historicoCodigosCarga` | Sequência integral de códigos de carga, preservada no metadado do RDV para análise de substituições. |
+| `eleicoes` / `idEleicao` | Variante Vota ou SA e identificador de cada eleição; SA também retém `tipoCedulaSA` e `origemVotosSA`. |
+| `idCargo`, `quantidadeEscolhas` | Tipo/código oficial do cargo e quantidade máxima de escolhas, sem substituir os códigos por rótulos externos. |
+| `Voto.tipoVoto` | Tipo enumerado oficial, preservado por registro e contado individualmente por cargo. Brancos e nulos também recebem totais amplos pelos prefixos semânticos do enum, mantendo as variantes separadas. |
+| `Voto.digitacao` | Valor textual exato quando presente. Para voto nominal é agregado como número do candidato; para legenda, como número do partido. A agregação numérica é normalizada para comparar com o BU e uma agregação paralela conserva os dígitos originais (inclusive zeros à esquerda); em outros tipos o campo fica preservado sem interpretação adicional. |
+| Posição do registro | Índice da sequência dentro da eleição e cargo. Descreve somente a posição serializada; não é horário, ordem cronológica nem chave compartilhada entre cargos. |
+| TLV BER de cada voto | Bytes exatos da codificação ASN.1 do registro individual, junto ao objeto estruturado. |
+
+A reconciliação compara total de registros por cargo, números nominais, partidos de legenda e totais branco/nulo com as categorias do BU que têm correspondência agregada explícita. Cada diferença é registrada. Os tipos específicos de suspensão permanecem visíveis individualmente; o agrupamento amplo para comparar branco/nulo segue o nome definido no enum do RDV. Categorias sem par inequívoco no BU não são silenciosamente convertidas. Um status `partial` indica cargo sem par; `divergence` indica total ou subtotal incompatível.
+
+O relatório inclui os registros individuais, então deve ser tratado como dado de votação com granularidade alta. O workflow retém o resumo e originais por até 90 dias no GitHub Actions; o original vem acompanhado de `manifest.aux.jws` e `collection.json`. Nem a posição do voto nem qualquer outro campo do RDV é associado a eleitor, horário de habilitação ou evento do log. Nenhuma inferência temporal é feita a partir da ordem.
+
+Limitações: a assinatura JWS ainda não é verificada, e o RDV cifrado não é decifrado; conversões entre enumerações com semânticas diferentes são deliberadamente evitadas; a validação não prova a autenticidade do emissor apenas pela conformidade ASN.1/SHA-256 local.

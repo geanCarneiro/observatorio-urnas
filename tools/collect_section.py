@@ -115,7 +115,7 @@ def main() -> int:
             raise ValueError("manifest contains an invalid content hash")
         for item in entry.get("arq", []):
             file_type, name = item.get("tp"), item.get("nm")
-            if file_type not in ("bu", "log"):
+            if file_type not in ("bu", "log", "rdv"):
                 continue
             if not isinstance(name, str) or Path(name).name != name:
                 raise ValueError("manifest contains an unsafe filename")

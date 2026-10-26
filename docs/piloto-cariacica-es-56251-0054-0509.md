@@ -14,4 +14,4 @@ O workflow manual fica em `.github/workflows/piloto-secao.yml`. O relatório é 
 
 ## Fonte da amostra
 
-Página do TSE fornecida para o piloto: Cariacica/ES, município 56251, zona 0054, seção 0509. O coletor consulta `aux.jws` da seção e baixa somente arquivos dos tipos `log` e `bu`. RDV e `vota.vsc` não são baixados.
+Página do TSE fornecida para o piloto: Cariacica/ES, município 56251, zona 0054, seção 0509. O coletor consulta `aux.jws` da seção e baixa arquivos dos tipos `log`, `bu` e `rdv`. O workflow exige ao menos um RDV, gera análise e preserva os bytes originais junto ao manifesto e metadados de aquisição em artefato próprio. `vota.vsc` permanece fora da coleta.

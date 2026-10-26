@@ -9,6 +9,7 @@ import json
 import re
 import zipfile
 import asn1tools
+from rdv import decode_rdv
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -61,9 +62,25 @@ def decode_bu(bu_path: Path, schema_path: Path) -> dict:
             cargos = []
             for cargo in result["totaisVotosCargo"]:
                 code_kind, code_value = cargo["codigoCargo"]
-                vote_total = sum(vote["quantidadeVotos"] for vote in cargo["votosVotaveis"])
+                vote_total = 0
+                vote_types = Counter()
+                nominal_by_number = Counter()
+                legend_by_number = Counter()
+                for vote in cargo["votosVotaveis"]:
+                    count = vote["quantidadeVotos"]
+                    vote_total += count
+                    vote_type = vote["tipoVoto"]
+                    vote_types[vote_type] += count
+                    identification = vote.get("identificacaoVotavel")
+                    if identification and vote_type == "nominal":
+                        nominal_by_number[str(identification["codigo"])] += count
+                    elif identification and vote_type == "legenda":
+                        legend_by_number[str(identification["partido"])] += count
                 cargos.append({"cargo_kind": code_kind, "cargo": code_value,
-                               "qtd_votos_bu": vote_total})
+                               "qtd_votos_bu": vote_total,
+                               "vote_type_counts": dict(vote_types),
+                               "nominal_by_number": dict(nominal_by_number),
+                               "legend_by_number": dict(legend_by_number)})
             results.append({"qtd_comparecimento": result["qtdComparecimento"], "cargos": cargos})
         elections.append({"id_eleicao": election["idEleicao"], "qtd_eleitores_aptos": election["qtdEleitoresAptos"], "results": results})
 
@@ -89,7 +106,8 @@ def decode_bu(bu_path: Path, schema_path: Path) -> dict:
     return data
 
 
-def analyze(log_path: Path, bu_path: Path, collection_path: Path, cuts: list[str], schema_path: Path) -> dict:
+def analyze(log_path: Path, bu_path: Path, collection_path: Path, cuts: list[str], schema_path: Path,
+            rdv_paths: list[Path] | None = None, rdv_schema_path: Path = Path("schemas/rdv.asn1")) -> dict:
     collection = json.loads(collection_path.read_text(encoding="utf-8"))
     metadata = next((f for f in collection["files"] if f["type"] == "log" and f["name"] == log_path.name), None)
     bu_metadata = next((f for f in collection["files"] if f["type"] == "bu" and f["name"] == bu_path.name), None)
@@ -162,6 +180,7 @@ def analyze(log_path: Path, bu_path: Path, collection_path: Path, cuts: list[str
         }
 
     bu = decode_bu(bu_path, schema_path)
+    rdvs = [decode_rdv(path, collection_path, rdv_schema_path, bu) for path in (rdv_paths or [])]
     bu_section = bu["section"]
     municipio_zona = bu_section["municipioZona"]
     bu_identity = {"phase": bu["phase"], "envelope_type": bu["envelope_type"],
@@ -233,9 +252,11 @@ def analyze(log_path: Path, bu_path: Path, collection_path: Path, cuts: list[str
         "jws_signature": "unverified",
     }
     return {
+        "report_schema_version": 3,
         "section_key": collection["section_key"],
         "acquisition_id": collection["acquired_at_utc"],
-        "source_files": {"manifest_sha256": collection["manifest_sha256"], "log_sha256": metadata["sha256"], "bu_sha256": bu_metadata["sha256"]},
+        "source_files": {"manifest_sha256": collection["manifest_sha256"], "log_sha256": metadata["sha256"], "bu_sha256": bu_metadata["sha256"],
+                         "rdv_sha256": [rdv["source"]["sha256"] for rdv in rdvs]},
         "bu_schema": {"source": BU_SCHEMA_SOURCE, "bundle_sha256": BU_SCHEMA_BUNDLE_SHA256,
                        "schema_sha256": schema_hash, "expected_schema_sha256": BU_SCHEMA_SHA256,
                        "matches_official_copy": schema_hash == BU_SCHEMA_SHA256},
@@ -258,6 +279,7 @@ def analyze(log_path: Path, bu_path: Path, collection_path: Path, cuts: list[str
         "event_count_total": len(events),
         "events_by_date": by_date,
         "relevant_events": events,
+        "rdv_files": rdvs,
         "privacy": {"individual_log_fields_excluded": True, "raw_message_or_elector_identifier_included": False},
         "limitations": ["log clock timezone and drift unvalidated", "JWS signature unverified", "possible urn replacement screening is not exhaustive", "counts describe logged events and do not imply causality or irregularity"],
     }
@@ -269,11 +291,13 @@ def main() -> int:
     parser.add_argument("--bu", required=True, type=Path)
     parser.add_argument("--collection", required=True, type=Path)
     parser.add_argument("--schema", type=Path, default=Path("schemas/bu.asn1"))
+    parser.add_argument("--rdv", type=Path, action="append", default=[], help="RDV file listed in the acquisition manifest; repeat for every RDV")
+    parser.add_argument("--rdv-schema", type=Path, default=Path("schemas/rdv.asn1"))
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--cut", action="append", dest="cuts", help="clock cut HH:MM; repeatable; defaults to configured pilot cuts")
     args = parser.parse_args()
     cuts = parse_cuts(args.cuts or list(DEFAULT_CUTS))
-    report = analyze(args.log, args.bu, args.collection, cuts, args.schema)
+    report = analyze(args.log, args.bu, args.collection, cuts, args.schema, args.rdv, args.rdv_schema)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({"output": str(args.output), "section_key": report["section_key"], "event_count_total": report["event_count_total"], "validation": report["validation"]}, ensure_ascii=False))
