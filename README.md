@@ -13,10 +13,10 @@ python3 tools/analyze_section.py --log "$(find "$RUN" -name '*-log.jez' -print -
   --collection "$RUN/collection.json" --output reports/piloto-secao-v2.json
 ```
 
-Os dados brutos ficam em `dados/`, ignorado pelo Git. O relatório contém apenas contagens de uma lista de eventos permitidos e horários agregados; valores de identificadores, biometria e outros campos do log são descartados. O horário/fuso da urna e a assinatura JWS ainda não foram validados, então os números são descritivos e não demonstram causalidade ou irregularidade.
+Os dados brutos ficam em `dados/`, ignorado pelo Git. O relatório contém timestamps individuais e resumos de uma lista fechada de eventos, sem mensagens brutas nem identificadores do log. Cortes `--cut HH:MM` podem ser repetidos. Os horários permanecem na escala bruta até que o fuso seja validado.
 
 ## GitHub Actions
 
-Na aba **Actions**, escolha **Piloto de coleta de seção** → **Run workflow**. Os campos já vêm preenchidos com Cariacica/ES, município 56251, zona 0054, seção 0509. O workflow baixa manifesto, BU e log, produz um resumo agregado e publica somente esse resumo como artefato por 30 dias. A coleta nacional não está habilitada neste workflow.
+Na aba **Actions**, escolha **Piloto de coleta de seção** → **Run workflow**. Os campos já vêm preenchidos com Cariacica/ES, município 56251, zona 0054, seção 0509. Edite os cortes HH:MM se necessário. O workflow baixa manifesto, BU e log, gera o relatório e o publica como artefato por 30 dias. A coleta nacional não está habilitada neste workflow.
 
 Consulte `docs/` para a auditoria da referência, desenho de escala e evidências/limitações do piloto.
