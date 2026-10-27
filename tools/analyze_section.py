@@ -483,19 +483,13 @@ def analyze_collection(collection_path: Path, cuts: list[str], bu_schema_path: P
         entries = [item for item in entries if item.get("type") != "bu" or
                    (collection_path.parent / item.get("relative_path", "")).resolve() in bu_filter]
     diagnostics = list(collection.get("diagnostics", []))
-    has_vsc_entry = any((item.get("type") == "vota.vsc" or
-                         (item.get("type") == "vota" and str(item.get("name", "")).lower().endswith(".vsc")))
-                        for item in entries)
     states = []
     for original_state in collection.get("file_states", []):
         state = dict(original_state)
         if state.get("type") == "vota" and str(state.get("name", "")).lower().endswith(".vsc"):
             state["type"] = "vota.vsc"
-            if state.get("status") == "not_processed":
-                state["status"] = "downloaded"
-                state["reason"] = "Preserved by the earlier collector; its manifest type alias was not recognized during collection."
-        if has_vsc_entry and state.get("type") == "vota.vsc" and not state.get("name") and state.get("status") == "not_applicable":
-            continue
+            state["status"] = "not_applicable"
+            state["reason"] = "Signature/validation sidecar is outside the analytical scope; it is ignored by analysis."
         states.append(state)
     manifest_path = collection_path.parent / "manifest.aux.jws"
     signature_codes = {item.get("code") for item in diagnostics if item.get("error_type") == "signature_cryptographic"}
@@ -524,24 +518,11 @@ def analyze_collection(collection_path: Path, cuts: list[str], bu_schema_path: P
     log_results = []
     bu_results = []
     rdv_results = []
-    signature_bundles = []
     for item in entries:
         file_type = item.get("type")
         if file_type == "vota" and str(item.get("name", "")).lower().endswith(".vsc"):
             file_type = "vota.vsc"
         if file_type == "vota.vsc":
-            relative = item.get("relative_path")
-            path = collection_path.parent / relative if relative else None
-            exists = bool(path and path.exists())
-            signature_bundles.append({
-                "name": item.get("name"), "path": str(path) if path else None,
-                "status": "preserved_not_interpreted" if exists else "missing",
-                "sha256": sha256_file(path) if exists else None,
-                "size_bytes": path.stat().st_size if exists else None,
-                "purpose": "TSE software/hardware signature bundle and signed-file hash declarations",
-                "signature_verification": "not_performed",
-                "scope_note": "Original bytes are preserved; embedded signatures and certificates are not interpreted in this release.",
-            })
             continue
         if file_type not in {"bu", "rdv", "log"}:
             continue
@@ -721,7 +702,7 @@ def analyze_collection(collection_path: Path, cuts: list[str], bu_schema_path: P
             "rdv_sha256": [item.get("source", {}).get("sha256") for item in rdv_results]},
         "file_processing": {"logs": log_results, "bus": bu_results, "rdvs": rdv_results,
             "states": states, "unprocessed_types": [s["type"] for s in states if s.get("status") == "not_processed"]},
-        "rdv_files": rdv_results, "signature_bundles": signature_bundles, "diagnostics": diagnostics,
+        "rdv_files": rdv_results, "diagnostics": diagnostics,
         "diagnostic_summary": summarize_diagnostics(diagnostics, states),
         "reconciliation": {"log_bu": (legacy_report or {}).get("validation", {}).get("bu_reconciliation"),
             "rdv_bu": [item.get("reconciliation_with_bu") for item in rdv_results]},

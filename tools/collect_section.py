@@ -264,7 +264,16 @@ def main() -> int:
                         file_type="jws", file_name=manifest_path.name, file_path=str(manifest_path),
                         position={"entry_index": entry_index, "file_index": file_index},
                         context={"file_type_value": repr(raw_file_type)}))
-                if file_type not in ("bu", "log", "rdv", "vota.vsc"):
+                listed_types.add(file_type)
+                if file_type == "vota.vsc":
+                    state = file_state(file_type=file_type, name=str(name) if name is not None else None,
+                        section=key, status="not_applicable",
+                        reason="Validation/signature sidecar is outside the analytical scope and was intentionally not downloaded.",
+                        detected_format="VSC")
+                    state["manifest_hash"] = content_hash
+                    run["file_states"].append(state)
+                    continue
+                if file_type not in ("bu", "log", "rdv"):
                     run["diagnostics"].append(diagnostic(code="COLLECT_FILE_TYPE_UNSUPPORTED", stage="format_detection",
                         operation="select_manifest_file_type", error_type="format_incompatibility",
                         cause="The manifest lists a file type not supported by the collector.", recoverability="permanent",
@@ -273,7 +282,6 @@ def main() -> int:
                         context={"manifest_hash": content_hash}))
                     run["file_states"].append(file_state(file_type=str(file_type), name=str(name), section=key,
                         status="not_processed", reason="Unsupported manifest file type."))
-                listed_types.add(file_type)
                 if not isinstance(name, str) or Path(name).name != name or "/" in name or "\\" in name or name in {".", ".."}:
                     run["diagnostics"].append(diagnostic(code="COLLECT_MANIFEST_FILENAME_UNSAFE", stage="semantic_validation",
                         operation="validate_manifest_filename", error_type="semantic_validation", cause="manifest filename is unsafe",
@@ -335,8 +343,8 @@ def main() -> int:
                 recoverability="indeterminate", section=key, file_type=file_type, file_name=None, file_path=None,
                 detected_format=None, context={"manifest_path": str(manifest_path)}))
     if "vota.vsc" not in listed_types:
-        run["file_states"].append(file_state(file_type="vota.vsc", name=None, section=key, status="missing",
-            reason="No signature bundle was listed in the JWS manifest."))
+        run["file_states"].append(file_state(file_type="vota.vsc", name=None, section=key, status="not_applicable",
+            reason="Signature/validation sidecars are outside the analytical scope and are not collected."))
     state_path = manifest_path.with_suffix(manifest_path.suffix + ".partial") if manifest_status == "partial" else manifest_path
     run["file_states"].append(file_state(file_type="jws", name=manifest_path.name, section=key,
         status=manifest_status, path=str(state_path), sha256=hashlib.sha256(state_path.read_bytes()).hexdigest() if state_path.exists() else run.get("manifest_sha256"),

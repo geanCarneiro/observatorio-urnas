@@ -1,5 +1,7 @@
 import hashlib
+import base64
 import json
+import io
 import sys
 import tempfile
 import unittest
@@ -15,6 +17,7 @@ from analyze_sections import analyze_sections
 from collect_sections import collect_sections
 from consolidate_diagnostics import consolidate_paths
 from collect_section import DownloadIncompleteError, canonical_manifest_file_type, fetch
+import collect_section
 from diagnostics import summarize_diagnostics, verify_jws_signature
 
 
@@ -25,6 +28,31 @@ class DiagnosticPipelineTests(unittest.TestCase):
     def test_official_vota_type_with_vsc_suffix_is_recognized_as_signature_bundle(self):
         self.assertEqual(canonical_manifest_file_type("vota", "es-p0001-s0001-vota.vsc"), "vota.vsc")
         self.assertEqual(canonical_manifest_file_type("bu", "section.bu"), "bu")
+
+    def test_collector_marks_vsc_not_applicable_without_downloading_it(self):
+        def b64url(value):
+            return base64.urlsafe_b64encode(value).decode().rstrip("=")
+
+        manifest = ".".join((
+            b64url(b'{"alg":"none"}'),
+            b64url(json.dumps({"hashes": [{"hash": "vsc-manifest-hash", "arq": [
+                {"tp": "vota", "nm": "es-p0001-s0001-vota.vsc"}]}]}).encode()),
+            "c2ln",
+        )).encode()
+        with tempfile.TemporaryDirectory() as temp, patch("collect_section.sys.argv", [
+                "collect_section.py", "--uf", "es", "--municipio", "56251", "--zona", "0054",
+                "--secao", "0509", "--output", temp]), \
+             patch("collect_section.fetch", return_value=(manifest, {"status": "200"})) as fetch_mock, \
+             patch("sys.stdout", new_callable=io.StringIO):
+            self.assertEqual(collect_section.main(), 0)
+            self.assertEqual(fetch_mock.call_count, 1)  # only aux.jws was fetched
+            collection_path = next(Path(temp).rglob("collection.json"))
+            collection = json.loads(collection_path.read_text(encoding="utf-8"))
+            self.assertEqual(collection["files"], [])
+            vsc_state = next(state for state in collection["file_states"] if state["type"] == "vota.vsc")
+            self.assertEqual(vsc_state["status"], "not_applicable")
+            self.assertEqual(vsc_state["manifest_hash"], "vsc-manifest-hash")
+            self.assertFalse(any(item["code"] == "COLLECT_FILE_TYPE_UNSUPPORTED" for item in collection["diagnostics"]))
 
     def test_log_activity_is_partitioned_by_event_date(self):
         with tempfile.TemporaryDirectory() as temp:
