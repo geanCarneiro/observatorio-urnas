@@ -55,7 +55,7 @@ ADMINISTRATIVE_EVENT_TYPES = {
     "comando_encerramento", "inicio_encerramento", "conclusao_encerramento",
 }
 INTERRUPTED_SESSION_STATUSES = {
-    "suspensa_sem_voto", "interrompida_por_falha", "interrompida_por_desligamento",
+    "suspensa_sem_voto", "suspensa_com_voto_confirmado", "interrompida_por_falha", "interrompida_por_desligamento",
     "interrompida_por_inicializacao",
 }
 DEFAULT_CUTS = ("17:00", "17:15", "17:30", "17:45", "18:00", "18:30", "19:00")
@@ -185,7 +185,8 @@ def _interruption_classification(session: dict) -> tuple[str, dict | None]:
     if not state_events:
         return "incompleta_indeterminada", None
     classification = {
-        "suspensao": "suspensa_sem_voto",
+        "suspensao": ("suspensa_com_voto_confirmado" if session.get("confirmation_events")
+                      else "suspensa_sem_voto"),
         "falha": "interrompida_por_falha",
         "desligamento": "interrompida_por_desligamento",
         "reinicializacao": "interrompida_por_desligamento",
@@ -217,6 +218,22 @@ def reconstruct_voting_sessions(events: list[dict]) -> dict:
         current["completed"] = status == "completed"
         current["session_end_event"] = end_event if status == "completed" else None
         current["completion_after_lifecycle_event"] = bool(current["completed"] and current["state_events"])
+        lifecycle_type = current["state_events"][-1].get("event_type") if current["state_events"] else None
+        current["lifecycle_before_outcome"] = ({
+            "classification": lifecycle_type,
+            "event": current["state_events"][-1],
+            "followed_by_session_end": bool(current["completed"]),
+            "prior_confirmation_count": len(current["confirmation_events"]),
+            "prior_confirmation_cargos": sorted({item.get("cargo") for item in current["confirmation_events"]}),
+        } if lifecycle_type else None)
+        current["outcome"] = ("completed_after_lifecycle_event" if current["completed"] and lifecycle_type
+                               else "completed" if current["completed"]
+                               else "interrupted" if lifecycle_type
+                               else "incomplete")
+        current["events_in_log_order"] = sorted(
+            [current["habilitation_event"], *current["confirmation_events"], *current["state_events"]]
+            + ([end_event] if end_event else []),
+            key=lambda item: (item.get("line_number") is None, item.get("line_number") or 0))
         if status in INTERRUPTED_SESSION_STATUSES or status == "incompleta_indeterminada":
             current["interruption_classification"] = status
         cargos = {"governador", "presidente"}
@@ -376,6 +393,9 @@ def presidential_only_session_metrics(sessions: list[dict], event_date: str,
                              if session.get("habilitation_event", {}).get("event_date") == event_date]
     incomplete_session_count = sum(session.get("status") == "incompleta_indeterminada"
                                    for session in election_day_sessions)
+    incomplete_without_confirmation_count = sum(
+        session.get("status") == "incompleta_indeterminada" and not session.get("confirmation_events")
+        for session in election_day_sessions)
     presidential_only_session_count = 0
     presidential_only_confirmation_count = 0
     ambiguous = 0
@@ -406,6 +426,7 @@ def presidential_only_session_metrics(sessions: list[dict], event_date: str,
             "presidential_only_session_count": presidential_only_session_count,
             "ambiguous_session_count": ambiguous,
             "completed_session_count": len(completed_sessions), "incomplete_session_count": incomplete_session_count,
+            "incomplete_without_confirmation_session_count": incomplete_without_confirmation_count,
             "unassigned_event_count": len(unassigned_for_date),
             "unassigned_operational_event_count": len(classified_unassigned) - len(relevant_unassigned),
             "reconciliation_relevant_unassigned_event_count": len(relevant_unassigned),
@@ -418,7 +439,7 @@ def presidential_only_session_metrics(sessions: list[dict], event_date: str,
                 for session in election_day_sessions),
             "event_date_present": event_date_present,
             "status": "complete" if event_date_present and session_coverage_matches
-                and not relevant_unassigned else "incomplete",
+                and not relevant_unassigned and not incomplete_without_confirmation_count else "incomplete",
             "semantics": "Each presidential confirmation is counted as a computed presidential vote. The count is restricted to reconstructed sessions with presidential confirmations and no confirmation for another cargo; session-end markers, interruptions, and possible-resumption annotations are reported separately and do not erase confirmed votes. No elector identity or TTE-record link is inferred."}
 
 
@@ -474,9 +495,34 @@ def reconcile_log_metrics(events: list[dict], sessions: list[dict], bu: dict,
                 cargo_status = ("not_available" if confirmation_count is None or not available_totals else
                     "inconclusive" if unknown_blockers else
                     "divergence" if any(confirmation_count != value for value in available_totals) else "matched")
+                lifecycle_context = []
+                if cargo_name:
+                    for session in sessions:
+                        if session.get("habilitation_event", {}).get("event_date") != bu_date:
+                            continue
+                        cargo_events = [item for item in session.get("confirmation_events", [])
+                                        if item.get("cargo") == cargo_name and item.get("event_date") == bu_date]
+                        if not cargo_events or not session.get("state_events"):
+                            continue
+                        lifecycle_context.append({
+                            "session_number": session.get("session_number"),
+                            "equipment_identifier": session.get("equipment_identifier"),
+                            "session_outcome": session.get("outcome", session.get("status")),
+                            "confirmation_count": len(cargo_events),
+                            "confirmation_lines": [item.get("line_number") for item in cargo_events],
+                            "lifecycle_events": [{"event_type": item.get("event_type"),
+                                "line_number": item.get("line_number"),
+                                "event_timestamp_raw": item.get("event_timestamp_raw")}
+                                for item in session.get("state_events", [])],
+                            "session_end_line": (session.get("session_end_event") or {}).get("line_number"),
+                        })
+                lifecycle_confirmation_count = sum(item["confirmation_count"] for item in lifecycle_context)
                 cargo_rows.append({
                     "election_id": election.get("id_eleicao"), "cargo": cargo_name or code,
+                    "explicit_confirmation_count": confirmation_count,
                     "log_computed_vote_confirmations": confirmation_count,
+                    "confirmations_in_sessions_with_lifecycle_events": lifecycle_confirmation_count,
+                    "lifecycle_context": lifecycle_context,
                     "bu_vote_total": bu_total, "rdv_record_count": rdv_count,
                     "confirmation_count_minus_bu": confirmation_count - bu_total if confirmation_count is not None and bu_total is not None else None,
                     "confirmation_count_minus_rdv": confirmation_count - rdv_count if confirmation_count is not None and rdv_count is not None else None,
@@ -485,7 +531,7 @@ def reconcile_log_metrics(events: list[dict], sessions: list[dict], bu: dict,
                     "comparison_status": cargo_status,
                     "reason": ("Unclassified potentially relevant events prevent a complete cargo comparison." if cargo_status == "inconclusive" else
                         "No comparable BU/RDV cargo total is available." if cargo_status == "not_available" else
-                        "Log cargo confirmations are compared directly because each confirmation represents a computed vote; the session-end marker is counted separately."),
+                        "Log cargo confirmations are compared directly because each confirmation represents a computed vote; the session-end marker is counted separately. Lifecycle-event context is shown as evidence and does not remove confirmations or explain away a difference."),
                 })
     rdv_statuses = [comparison.get("status") for comparison in rdv_bu_by_cargo.values()]
     cargo_statuses = [row["comparison_status"] for row in cargo_rows]

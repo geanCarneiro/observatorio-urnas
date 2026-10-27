@@ -231,7 +231,7 @@ class DiagnosticPipelineTests(unittest.TestCase):
         ]}}]
 
         report = reconcile_log_metrics(events, sessions, bu, rdvs, "2026-10-25")
-        self.assertEqual(report["status"], "matched")
+        self.assertEqual(report["status"], "inconclusive")
         self.assertEqual(report["by_metric"]["habilitacoes"]["comparison_status"], "not_compared")
         self.assertEqual(report["by_metric"]["fim_de_sessao_vs_bu_comparecimento"]["log_session_end_count"], 3)
         self.assertEqual(report["by_metric"]["fim_de_sessao_vs_bu_comparecimento"]["status"], "matched")
@@ -306,7 +306,8 @@ class DiagnosticPipelineTests(unittest.TestCase):
 
         cases = [
             ([event(1, "habilitacao"), event(2, "voto_confirmado_governador"), event(3, "suspensao")],
-             "suspensa_sem_voto"),
+             "suspensa_com_voto_confirmado"),
+            ([event(1, "habilitacao"), event(2, "suspensao")], "suspensa_sem_voto"),
             ([event(1, "habilitacao"), event(2, "voto_confirmado_governador"), event(3, "falha")],
              "interrompida_por_falha"),
             ([event(1, "habilitacao"), event(2, "voto_confirmado_governador"), event(3, "desligamento"),
@@ -321,7 +322,11 @@ class DiagnosticPipelineTests(unittest.TestCase):
                 result = reconstruct_voting_sessions(events)
                 session = result["sessions"][0]
                 self.assertEqual(session["status"], expected_status)
-                self.assertEqual(session["cargo_confirmations"]["governador"][0]["line_number"], 2)
+                governor_confirmations = session["cargo_confirmations"]["governador"]
+                expected_governor_line = 2 if any(item["event_type"] == "voto_confirmado_governador"
+                    for item in events) else None
+                self.assertEqual(governor_confirmations[0]["line_number"] if governor_confirmations else None,
+                                 expected_governor_line)
                 self.assertEqual([item["line_number"] for item in session["state_events"]],
                     [item["line_number"] for item in events if item["event_type"] in {
                         "suspensao", "falha", "desligamento", "reinicializacao", "inicializacao"}])
@@ -330,9 +335,78 @@ class DiagnosticPipelineTests(unittest.TestCase):
             event(1, "habilitacao"), event(2, "voto_confirmado_governador"), event(3, "suspensao")])
         suspended_metric = presidential_only_session_metrics(suspended["sessions"], "2026-10-25",
             suspended["unassigned_events"], True, habilitation_event_count=1)
-        self.assertEqual(suspended["sessions"][0]["status"], "suspensa_sem_voto")
+        self.assertEqual(suspended["sessions"][0]["status"], "suspensa_com_voto_confirmado")
         self.assertEqual(suspended_metric["incomplete_session_count"], 0)
         self.assertEqual(suspended_metric["status"], "complete")
+
+    def test_suspension_followed_by_session_end_keeps_distinct_outcome_and_cargo_evidence(self):
+        def event(line, kind, cargo=None):
+            item = {"line_number": line, "event_type": kind,
+                "event_timestamp_raw": f"25/10/2026 08:00:{line:02d}",
+                "event_date": "2026-10-25", "equipment_identifier": "device-hash"}
+            if cargo:
+                item["cargo"] = cargo
+            return item
+
+        events = [event(1, "habilitacao"), event(2, "voto_confirmado_governador", "governador"),
+                  event(3, "suspensao"), event(4, "fim_sessao_votacao")]
+        reconstruction = reconstruct_voting_sessions(events)
+        session = reconstruction["sessions"][0]
+        self.assertEqual(session["status"], "completed")
+        self.assertEqual(session["outcome"], "completed_after_lifecycle_event")
+        self.assertEqual(session["lifecycle_before_outcome"]["classification"], "suspensao")
+        self.assertTrue(session["lifecycle_before_outcome"]["followed_by_session_end"])
+        self.assertEqual([item["event_type"] for item in session["events_in_log_order"]],
+                         ["habilitacao", "voto_confirmado_governador", "suspensao", "fim_sessao_votacao"])
+        self.assertEqual(session["cargo_confirmations"]["governador"][0]["line_number"], 2)
+        self.assertEqual(session["cargo_confirmations"]["presidente"], [])
+
+    def test_failures_keep_prior_confirmations_counted_and_marked_as_context(self):
+        def event(line, kind, cargo=None):
+            item = {"line_number": line, "event_type": kind,
+                "event_timestamp_raw": f"25/10/2026 08:00:{line:02d}",
+                "event_date": "2026-10-25", "equipment_identifier": "device-hash"}
+            if cargo:
+                item["cargo"] = cargo
+            return item
+
+        events = [event(1, "habilitacao"), event(2, "voto_confirmado_governador", "governador"),
+                  event(3, "falha"), event(4, "desligamento")]
+        reconstruction = reconstruct_voting_sessions(events)
+        session = reconstruction["sessions"][0]
+        self.assertEqual(session["status"], "interrompida_por_falha")
+        self.assertEqual(session["outcome"], "interrupted")
+        self.assertEqual(session["lifecycle_before_outcome"]["prior_confirmation_count"], 1)
+        self.assertEqual(session["cargo_confirmations"]["governador"][0]["line_number"], 2)
+
+    def test_reconciliation_preserves_cargo_divergences_with_exception_context(self):
+        def event(line, kind, cargo=None):
+            item = {"line_number": line, "event_type": kind,
+                "event_timestamp_raw": f"25/10/2026 08:00:{line:02d}",
+                "event_date": "2026-10-25", "equipment_identifier": "device-hash"}
+            if cargo:
+                item["cargo"] = cargo
+            return item
+
+        events = [event(1, "habilitacao"), event(2, "voto_confirmado_governador", "governador"),
+                  event(3, "suspensao"), event(4, "fim_sessao_votacao")]
+        sessions = reconstruct_voting_sessions(events)["sessions"]
+        bu = {"qtd_eleitores_compareceram": 1, "elections": [{"id_eleicao": 304, "results": [{"cargos": [
+            {"cargo_kind": "cargoConstitucional", "cargo": 1, "qtd_votos_bu": 1},
+            {"cargo_kind": "cargoConstitucional", "cargo": 3, "qtd_votos_bu": 1},
+        ]}]}]}
+        report = reconcile_log_metrics(events, sessions, bu, [], "2026-10-25")
+        president = next(item for item in report["by_cargo"] if item["cargo"] == "presidente")
+        governor = next(item for item in report["by_cargo"] if item["cargo"] == "governador")
+        self.assertEqual(president["explicit_confirmation_count"], 0)
+        self.assertEqual(president["bu_vote_total"], 1)
+        self.assertEqual(president["comparison_status"], "divergence")
+        self.assertEqual(president["lifecycle_context"], [])
+        self.assertEqual(governor["explicit_confirmation_count"], 1)
+        self.assertEqual(governor["confirmation_count_minus_bu"], 0)
+        self.assertEqual(governor["confirmations_in_sessions_with_lifecycle_events"], 1)
+        self.assertEqual(governor["lifecycle_context"][0]["lifecycle_events"][0]["event_type"], "suspensao")
+        self.assertEqual(report["by_metric"]["votos_computados_confirmados_por_cargo"]["presidente"], 0)
 
     def test_following_habilitation_is_possible_indeterminate_resumption_not_merged(self):
         def event(line, kind):
@@ -759,6 +833,7 @@ class DiagnosticPipelineTests(unittest.TestCase):
             self.assertIn("event_counts_by_date", report["file_processing"]["logs"][0])
             self.assertEqual(report["transferencia_temporaria"]["status"], "dados_insuficientes")
             self.assertEqual(report["transferencia_temporaria"]["log_metric_detail"]["incomplete_session_count"], 1)
+            self.assertEqual(report["reconciliation"]["log_bu"]["status"], "inconclusive")
 
 
 if __name__ == "__main__":
