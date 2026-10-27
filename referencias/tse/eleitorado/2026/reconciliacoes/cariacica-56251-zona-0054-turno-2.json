@@ -1,0 +1,567 @@
+{
+  "report_type": "tse_temporary_transfer_section_reconciliation",
+  "schema_version": 1,
+  "generated_at_utc": "2026-10-27T04:54:37.324530+00:00",
+  "log_metric_source": "values_supplied_explicitly_by_user",
+  "scope": {
+    "election_year": 2026,
+    "turn": 2
+  },
+  "row_count": 6,
+  "status_counts": {
+    "compatível": 3,
+    "confirmado": 3
+  },
+  "sections": [
+    {
+      "section_key": "es/56251/0054/0037",
+      "uf": "ES",
+      "municipio": "56251",
+      "zona": "0054",
+      "secao": "0037",
+      "turno": 2,
+      "status": "compatível",
+      "reason": "The log count does not exceed the official Federal temporary-transfer count; the sources do not establish which registered voters actually voted.",
+      "log_presidential_only_computed_sessions": 13,
+      "log_metric_detail": {
+        "count": 13,
+        "event_date": "2026-10-25",
+        "status": "complete"
+      },
+      "reference_federal_transfer_count": 14,
+      "reference_transfer_type_scope_breakdown": [
+        {
+          "tipo_transferencia": "Voto em Trânsito",
+          "abrangencia": "Estadual",
+          "quantidade_eleitores": 4
+        },
+        {
+          "tipo_transferencia": "Voto em Trânsito",
+          "abrangencia": "Federal",
+          "quantidade_eleitores": 14
+        }
+      ],
+      "reference_rows_present": true,
+      "event_date": "2026-10-25",
+      "individual_session_tte_join_performed": false,
+      "non_inference_note": "No individual voting session is attributed to a TTE elector; only section-level counts are compared.",
+      "reference": {
+        "resource_id": "4162f440-1037-4b36-9529-9544120604fa",
+        "resource_name": "Transferência temporária do eleitorado por seção - 2026",
+        "resource_url_discovered_via_ckan": "https://cdn.tse.jus.br/estatistica/sead/odsele/perfil_eleitor_tte/transf_temporaria_secao_2026.zip",
+        "zip_path": "referencias/tse/eleitorado/2026/transf_temporaria_secao_2026.zip",
+        "zip_sha256": "7c7cf0b4b9c8bd3230157aceb08eb8c6c164d1fe44e536bfc5fa4296a9bdca22",
+        "obtained_at_utc": "2026-10-27T04:47:25.690148+00:00",
+        "row_count": 1154903,
+        "valid_data_rows": 1154903,
+        "invalid_rows": 0,
+        "data_generation_values": [
+          {
+            "date": "26/10/2026",
+            "time_brasilia": "06:30:08"
+          }
+        ],
+        "header": [
+          "DT_GERACAO",
+          "HH_GERACAO",
+          "AA_ELEICAO",
+          "NR_TURNO",
+          "TP_TTE",
+          "TP_ABRANGENCIA_TTE",
+          "SG_UF_ORIGEM",
+          "CD_MUNICIPIO_ORIGEM",
+          "NM_MUNICIPIO_ORIGEM",
+          "NR_ZONA_ORIGEM",
+          "NR_SECAO_ORIGEM",
+          "SG_UF_DESTINO",
+          "CD_MUNICIPIO_DESTINO",
+          "NM_MUNICIPIO_DESTINO",
+          "NR_ZONA_DESTINO",
+          "NR_SECAO_DESTINO",
+          "QT_ELEITOR"
+        ],
+        "turns_observed": [
+          1,
+          2
+        ],
+        "transfer_types_observed": [
+          "Acessibilidade",
+          "Eleitor Convocado",
+          "Indígenas e Quilombolas",
+          "Justiça Eleitoral",
+          "Militar em Serviço",
+          "Preso Provisório",
+          "Situação de Rua",
+          "Voto em Trânsito"
+        ],
+        "scopes_observed": [
+          "Estadual",
+          "Federal",
+          "Municipal"
+        ],
+        "status": "complete",
+        "first_row_errors": []
+      }
+    },
+    {
+      "section_key": "es/56251/0054/0067",
+      "uf": "ES",
+      "municipio": "56251",
+      "zona": "0054",
+      "secao": "0067",
+      "turno": 2,
+      "status": "confirmado",
+      "reason": "The aggregate log count equals the official destination-section count for Federal temporary transfers. This confirms count compatibility only, not session-to-elector identity.",
+      "log_presidential_only_computed_sessions": 13,
+      "log_metric_detail": {
+        "count": 13,
+        "event_date": "2026-10-25",
+        "status": "complete"
+      },
+      "reference_federal_transfer_count": 13,
+      "reference_transfer_type_scope_breakdown": [
+        {
+          "tipo_transferencia": "Voto em Trânsito",
+          "abrangencia": "Estadual",
+          "quantidade_eleitores": 7
+        },
+        {
+          "tipo_transferencia": "Voto em Trânsito",
+          "abrangencia": "Federal",
+          "quantidade_eleitores": 13
+        }
+      ],
+      "reference_rows_present": true,
+      "event_date": "2026-10-25",
+      "individual_session_tte_join_performed": false,
+      "non_inference_note": "No individual voting session is attributed to a TTE elector; only section-level counts are compared.",
+      "reference": {
+        "resource_id": "4162f440-1037-4b36-9529-9544120604fa",
+        "resource_name": "Transferência temporária do eleitorado por seção - 2026",
+        "resource_url_discovered_via_ckan": "https://cdn.tse.jus.br/estatistica/sead/odsele/perfil_eleitor_tte/transf_temporaria_secao_2026.zip",
+        "zip_path": "referencias/tse/eleitorado/2026/transf_temporaria_secao_2026.zip",
+        "zip_sha256": "7c7cf0b4b9c8bd3230157aceb08eb8c6c164d1fe44e536bfc5fa4296a9bdca22",
+        "obtained_at_utc": "2026-10-27T04:47:25.690148+00:00",
+        "row_count": 1154903,
+        "valid_data_rows": 1154903,
+        "invalid_rows": 0,
+        "data_generation_values": [
+          {
+            "date": "26/10/2026",
+            "time_brasilia": "06:30:08"
+          }
+        ],
+        "header": [
+          "DT_GERACAO",
+          "HH_GERACAO",
+          "AA_ELEICAO",
+          "NR_TURNO",
+          "TP_TTE",
+          "TP_ABRANGENCIA_TTE",
+          "SG_UF_ORIGEM",
+          "CD_MUNICIPIO_ORIGEM",
+          "NM_MUNICIPIO_ORIGEM",
+          "NR_ZONA_ORIGEM",
+          "NR_SECAO_ORIGEM",
+          "SG_UF_DESTINO",
+          "CD_MUNICIPIO_DESTINO",
+          "NM_MUNICIPIO_DESTINO",
+          "NR_ZONA_DESTINO",
+          "NR_SECAO_DESTINO",
+          "QT_ELEITOR"
+        ],
+        "turns_observed": [
+          1,
+          2
+        ],
+        "transfer_types_observed": [
+          "Acessibilidade",
+          "Eleitor Convocado",
+          "Indígenas e Quilombolas",
+          "Justiça Eleitoral",
+          "Militar em Serviço",
+          "Preso Provisório",
+          "Situação de Rua",
+          "Voto em Trânsito"
+        ],
+        "scopes_observed": [
+          "Estadual",
+          "Federal",
+          "Municipal"
+        ],
+        "status": "complete",
+        "first_row_errors": []
+      }
+    },
+    {
+      "section_key": "es/56251/0054/0399",
+      "uf": "ES",
+      "municipio": "56251",
+      "zona": "0054",
+      "secao": "0399",
+      "turno": 2,
+      "status": "confirmado",
+      "reason": "The aggregate log count equals the official destination-section count for Federal temporary transfers. This confirms count compatibility only, not session-to-elector identity.",
+      "log_presidential_only_computed_sessions": 1,
+      "log_metric_detail": {
+        "count": 1,
+        "event_date": "2026-10-25",
+        "status": "complete"
+      },
+      "reference_federal_transfer_count": 1,
+      "reference_transfer_type_scope_breakdown": [
+        {
+          "tipo_transferencia": "Voto em Trânsito",
+          "abrangencia": "Federal",
+          "quantidade_eleitores": 1
+        }
+      ],
+      "reference_rows_present": true,
+      "event_date": "2026-10-25",
+      "individual_session_tte_join_performed": false,
+      "non_inference_note": "No individual voting session is attributed to a TTE elector; only section-level counts are compared.",
+      "reference": {
+        "resource_id": "4162f440-1037-4b36-9529-9544120604fa",
+        "resource_name": "Transferência temporária do eleitorado por seção - 2026",
+        "resource_url_discovered_via_ckan": "https://cdn.tse.jus.br/estatistica/sead/odsele/perfil_eleitor_tte/transf_temporaria_secao_2026.zip",
+        "zip_path": "referencias/tse/eleitorado/2026/transf_temporaria_secao_2026.zip",
+        "zip_sha256": "7c7cf0b4b9c8bd3230157aceb08eb8c6c164d1fe44e536bfc5fa4296a9bdca22",
+        "obtained_at_utc": "2026-10-27T04:47:25.690148+00:00",
+        "row_count": 1154903,
+        "valid_data_rows": 1154903,
+        "invalid_rows": 0,
+        "data_generation_values": [
+          {
+            "date": "26/10/2026",
+            "time_brasilia": "06:30:08"
+          }
+        ],
+        "header": [
+          "DT_GERACAO",
+          "HH_GERACAO",
+          "AA_ELEICAO",
+          "NR_TURNO",
+          "TP_TTE",
+          "TP_ABRANGENCIA_TTE",
+          "SG_UF_ORIGEM",
+          "CD_MUNICIPIO_ORIGEM",
+          "NM_MUNICIPIO_ORIGEM",
+          "NR_ZONA_ORIGEM",
+          "NR_SECAO_ORIGEM",
+          "SG_UF_DESTINO",
+          "CD_MUNICIPIO_DESTINO",
+          "NM_MUNICIPIO_DESTINO",
+          "NR_ZONA_DESTINO",
+          "NR_SECAO_DESTINO",
+          "QT_ELEITOR"
+        ],
+        "turns_observed": [
+          1,
+          2
+        ],
+        "transfer_types_observed": [
+          "Acessibilidade",
+          "Eleitor Convocado",
+          "Indígenas e Quilombolas",
+          "Justiça Eleitoral",
+          "Militar em Serviço",
+          "Preso Provisório",
+          "Situação de Rua",
+          "Voto em Trânsito"
+        ],
+        "scopes_observed": [
+          "Estadual",
+          "Federal",
+          "Municipal"
+        ],
+        "status": "complete",
+        "first_row_errors": []
+      }
+    },
+    {
+      "section_key": "es/56251/0054/0559",
+      "uf": "ES",
+      "municipio": "56251",
+      "zona": "0054",
+      "secao": "0559",
+      "turno": 2,
+      "status": "compatível",
+      "reason": "The log count does not exceed the official Federal temporary-transfer count; the sources do not establish which registered voters actually voted.",
+      "log_presidential_only_computed_sessions": 43,
+      "log_metric_detail": {
+        "count": 43,
+        "event_date": "2026-10-25",
+        "status": "complete"
+      },
+      "reference_federal_transfer_count": 51,
+      "reference_transfer_type_scope_breakdown": [
+        {
+          "tipo_transferencia": "Justiça Eleitoral",
+          "abrangencia": "Federal",
+          "quantidade_eleitores": 1
+        },
+        {
+          "tipo_transferencia": "Voto em Trânsito",
+          "abrangencia": "Estadual",
+          "quantidade_eleitores": 30
+        },
+        {
+          "tipo_transferencia": "Voto em Trânsito",
+          "abrangencia": "Federal",
+          "quantidade_eleitores": 50
+        }
+      ],
+      "reference_rows_present": true,
+      "event_date": "2026-10-25",
+      "individual_session_tte_join_performed": false,
+      "non_inference_note": "No individual voting session is attributed to a TTE elector; only section-level counts are compared.",
+      "reference": {
+        "resource_id": "4162f440-1037-4b36-9529-9544120604fa",
+        "resource_name": "Transferência temporária do eleitorado por seção - 2026",
+        "resource_url_discovered_via_ckan": "https://cdn.tse.jus.br/estatistica/sead/odsele/perfil_eleitor_tte/transf_temporaria_secao_2026.zip",
+        "zip_path": "referencias/tse/eleitorado/2026/transf_temporaria_secao_2026.zip",
+        "zip_sha256": "7c7cf0b4b9c8bd3230157aceb08eb8c6c164d1fe44e536bfc5fa4296a9bdca22",
+        "obtained_at_utc": "2026-10-27T04:47:25.690148+00:00",
+        "row_count": 1154903,
+        "valid_data_rows": 1154903,
+        "invalid_rows": 0,
+        "data_generation_values": [
+          {
+            "date": "26/10/2026",
+            "time_brasilia": "06:30:08"
+          }
+        ],
+        "header": [
+          "DT_GERACAO",
+          "HH_GERACAO",
+          "AA_ELEICAO",
+          "NR_TURNO",
+          "TP_TTE",
+          "TP_ABRANGENCIA_TTE",
+          "SG_UF_ORIGEM",
+          "CD_MUNICIPIO_ORIGEM",
+          "NM_MUNICIPIO_ORIGEM",
+          "NR_ZONA_ORIGEM",
+          "NR_SECAO_ORIGEM",
+          "SG_UF_DESTINO",
+          "CD_MUNICIPIO_DESTINO",
+          "NM_MUNICIPIO_DESTINO",
+          "NR_ZONA_DESTINO",
+          "NR_SECAO_DESTINO",
+          "QT_ELEITOR"
+        ],
+        "turns_observed": [
+          1,
+          2
+        ],
+        "transfer_types_observed": [
+          "Acessibilidade",
+          "Eleitor Convocado",
+          "Indígenas e Quilombolas",
+          "Justiça Eleitoral",
+          "Militar em Serviço",
+          "Preso Provisório",
+          "Situação de Rua",
+          "Voto em Trânsito"
+        ],
+        "scopes_observed": [
+          "Estadual",
+          "Federal",
+          "Municipal"
+        ],
+        "status": "complete",
+        "first_row_errors": []
+      }
+    },
+    {
+      "section_key": "es/56251/0054/0565",
+      "uf": "ES",
+      "municipio": "56251",
+      "zona": "0054",
+      "secao": "0565",
+      "turno": 2,
+      "status": "compatível",
+      "reason": "The log count does not exceed the official Federal temporary-transfer count; the sources do not establish which registered voters actually voted.",
+      "log_presidential_only_computed_sessions": 10,
+      "log_metric_detail": {
+        "count": 10,
+        "event_date": "2026-10-25",
+        "status": "complete"
+      },
+      "reference_federal_transfer_count": 13,
+      "reference_transfer_type_scope_breakdown": [
+        {
+          "tipo_transferencia": "Voto em Trânsito",
+          "abrangencia": "Estadual",
+          "quantidade_eleitores": 5
+        },
+        {
+          "tipo_transferencia": "Voto em Trânsito",
+          "abrangencia": "Federal",
+          "quantidade_eleitores": 13
+        }
+      ],
+      "reference_rows_present": true,
+      "event_date": "2026-10-25",
+      "individual_session_tte_join_performed": false,
+      "non_inference_note": "No individual voting session is attributed to a TTE elector; only section-level counts are compared.",
+      "reference": {
+        "resource_id": "4162f440-1037-4b36-9529-9544120604fa",
+        "resource_name": "Transferência temporária do eleitorado por seção - 2026",
+        "resource_url_discovered_via_ckan": "https://cdn.tse.jus.br/estatistica/sead/odsele/perfil_eleitor_tte/transf_temporaria_secao_2026.zip",
+        "zip_path": "referencias/tse/eleitorado/2026/transf_temporaria_secao_2026.zip",
+        "zip_sha256": "7c7cf0b4b9c8bd3230157aceb08eb8c6c164d1fe44e536bfc5fa4296a9bdca22",
+        "obtained_at_utc": "2026-10-27T04:47:25.690148+00:00",
+        "row_count": 1154903,
+        "valid_data_rows": 1154903,
+        "invalid_rows": 0,
+        "data_generation_values": [
+          {
+            "date": "26/10/2026",
+            "time_brasilia": "06:30:08"
+          }
+        ],
+        "header": [
+          "DT_GERACAO",
+          "HH_GERACAO",
+          "AA_ELEICAO",
+          "NR_TURNO",
+          "TP_TTE",
+          "TP_ABRANGENCIA_TTE",
+          "SG_UF_ORIGEM",
+          "CD_MUNICIPIO_ORIGEM",
+          "NM_MUNICIPIO_ORIGEM",
+          "NR_ZONA_ORIGEM",
+          "NR_SECAO_ORIGEM",
+          "SG_UF_DESTINO",
+          "CD_MUNICIPIO_DESTINO",
+          "NM_MUNICIPIO_DESTINO",
+          "NR_ZONA_DESTINO",
+          "NR_SECAO_DESTINO",
+          "QT_ELEITOR"
+        ],
+        "turns_observed": [
+          1,
+          2
+        ],
+        "transfer_types_observed": [
+          "Acessibilidade",
+          "Eleitor Convocado",
+          "Indígenas e Quilombolas",
+          "Justiça Eleitoral",
+          "Militar em Serviço",
+          "Preso Provisório",
+          "Situação de Rua",
+          "Voto em Trânsito"
+        ],
+        "scopes_observed": [
+          "Estadual",
+          "Federal",
+          "Municipal"
+        ],
+        "status": "complete",
+        "first_row_errors": []
+      }
+    },
+    {
+      "section_key": "es/56251/0054/0609",
+      "uf": "ES",
+      "municipio": "56251",
+      "zona": "0054",
+      "secao": "0609",
+      "turno": 2,
+      "status": "confirmado",
+      "reason": "The aggregate log count equals the official destination-section count for Federal temporary transfers. This confirms count compatibility only, not session-to-elector identity.",
+      "log_presidential_only_computed_sessions": 1,
+      "log_metric_detail": {
+        "count": 1,
+        "event_date": "2026-10-25",
+        "status": "complete"
+      },
+      "reference_federal_transfer_count": 1,
+      "reference_transfer_type_scope_breakdown": [
+        {
+          "tipo_transferencia": "Militar em Serviço",
+          "abrangencia": "Estadual",
+          "quantidade_eleitores": 10
+        },
+        {
+          "tipo_transferencia": "Militar em Serviço",
+          "abrangencia": "Federal",
+          "quantidade_eleitores": 1
+        },
+        {
+          "tipo_transferencia": "Militar em Serviço",
+          "abrangencia": "Municipal",
+          "quantidade_eleitores": 6
+        },
+        {
+          "tipo_transferencia": "Preso Provisório",
+          "abrangencia": "Municipal",
+          "quantidade_eleitores": 34
+        }
+      ],
+      "reference_rows_present": true,
+      "event_date": "2026-10-25",
+      "individual_session_tte_join_performed": false,
+      "non_inference_note": "No individual voting session is attributed to a TTE elector; only section-level counts are compared.",
+      "reference": {
+        "resource_id": "4162f440-1037-4b36-9529-9544120604fa",
+        "resource_name": "Transferência temporária do eleitorado por seção - 2026",
+        "resource_url_discovered_via_ckan": "https://cdn.tse.jus.br/estatistica/sead/odsele/perfil_eleitor_tte/transf_temporaria_secao_2026.zip",
+        "zip_path": "referencias/tse/eleitorado/2026/transf_temporaria_secao_2026.zip",
+        "zip_sha256": "7c7cf0b4b9c8bd3230157aceb08eb8c6c164d1fe44e536bfc5fa4296a9bdca22",
+        "obtained_at_utc": "2026-10-27T04:47:25.690148+00:00",
+        "row_count": 1154903,
+        "valid_data_rows": 1154903,
+        "invalid_rows": 0,
+        "data_generation_values": [
+          {
+            "date": "26/10/2026",
+            "time_brasilia": "06:30:08"
+          }
+        ],
+        "header": [
+          "DT_GERACAO",
+          "HH_GERACAO",
+          "AA_ELEICAO",
+          "NR_TURNO",
+          "TP_TTE",
+          "TP_ABRANGENCIA_TTE",
+          "SG_UF_ORIGEM",
+          "CD_MUNICIPIO_ORIGEM",
+          "NM_MUNICIPIO_ORIGEM",
+          "NR_ZONA_ORIGEM",
+          "NR_SECAO_ORIGEM",
+          "SG_UF_DESTINO",
+          "CD_MUNICIPIO_DESTINO",
+          "NM_MUNICIPIO_DESTINO",
+          "NR_ZONA_DESTINO",
+          "NR_SECAO_DESTINO",
+          "QT_ELEITOR"
+        ],
+        "turns_observed": [
+          1,
+          2
+        ],
+        "transfer_types_observed": [
+          "Acessibilidade",
+          "Eleitor Convocado",
+          "Indígenas e Quilombolas",
+          "Justiça Eleitoral",
+          "Militar em Serviço",
+          "Preso Provisório",
+          "Situação de Rua",
+          "Voto em Trânsito"
+        ],
+        "scopes_observed": [
+          "Estadual",
+          "Federal",
+          "Municipal"
+        ],
+        "status": "complete",
+        "first_row_errors": []
+      }
+    }
+  ]
+}

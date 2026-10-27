@@ -1,0 +1,15 @@
+﻿section_key,uf,municipio,zona,secao,turno,tipo_transferencia,abrangencia,quantidade_eleitores,reference_federal_transfer_count,log_presidential_only_computed_sessions,difference_log_minus_reference,status,source_zip_sha256,event_date
+es/56251/0054/0037,ES,56251,0054,0037,2,Voto em Trânsito,Estadual,4,14,13,-1,compatível,7c7cf0b4b9c8bd3230157aceb08eb8c6c164d1fe44e536bfc5fa4296a9bdca22,2026-10-25
+es/56251/0054/0037,ES,56251,0054,0037,2,Voto em Trânsito,Federal,14,14,13,-1,compatível,7c7cf0b4b9c8bd3230157aceb08eb8c6c164d1fe44e536bfc5fa4296a9bdca22,2026-10-25
+es/56251/0054/0067,ES,56251,0054,0067,2,Voto em Trânsito,Estadual,7,13,13,0,confirmado,7c7cf0b4b9c8bd3230157aceb08eb8c6c164d1fe44e536bfc5fa4296a9bdca22,2026-10-25
+es/56251/0054/0067,ES,56251,0054,0067,2,Voto em Trânsito,Federal,13,13,13,0,confirmado,7c7cf0b4b9c8bd3230157aceb08eb8c6c164d1fe44e536bfc5fa4296a9bdca22,2026-10-25
+es/56251/0054/0399,ES,56251,0054,0399,2,Voto em Trânsito,Federal,1,1,1,0,confirmado,7c7cf0b4b9c8bd3230157aceb08eb8c6c164d1fe44e536bfc5fa4296a9bdca22,2026-10-25
+es/56251/0054/0559,ES,56251,0054,0559,2,Justiça Eleitoral,Federal,1,51,43,-8,compatível,7c7cf0b4b9c8bd3230157aceb08eb8c6c164d1fe44e536bfc5fa4296a9bdca22,2026-10-25
+es/56251/0054/0559,ES,56251,0054,0559,2,Voto em Trânsito,Estadual,30,51,43,-8,compatível,7c7cf0b4b9c8bd3230157aceb08eb8c6c164d1fe44e536bfc5fa4296a9bdca22,2026-10-25
+es/56251/0054/0559,ES,56251,0054,0559,2,Voto em Trânsito,Federal,50,51,43,-8,compatível,7c7cf0b4b9c8bd3230157aceb08eb8c6c164d1fe44e536bfc5fa4296a9bdca22,2026-10-25
+es/56251/0054/0565,ES,56251,0054,0565,2,Voto em Trânsito,Estadual,5,13,10,-3,compatível,7c7cf0b4b9c8bd3230157aceb08eb8c6c164d1fe44e536bfc5fa4296a9bdca22,2026-10-25
+es/56251/0054/0565,ES,56251,0054,0565,2,Voto em Trânsito,Federal,13,13,10,-3,compatível,7c7cf0b4b9c8bd3230157aceb08eb8c6c164d1fe44e536bfc5fa4296a9bdca22,2026-10-25
+es/56251/0054/0609,ES,56251,0054,0609,2,Militar em Serviço,Estadual,10,1,1,0,confirmado,7c7cf0b4b9c8bd3230157aceb08eb8c6c164d1fe44e536bfc5fa4296a9bdca22,2026-10-25
+es/56251/0054/0609,ES,56251,0054,0609,2,Militar em Serviço,Federal,1,1,1,0,confirmado,7c7cf0b4b9c8bd3230157aceb08eb8c6c164d1fe44e536bfc5fa4296a9bdca22,2026-10-25
+es/56251/0054/0609,ES,56251,0054,0609,2,Militar em Serviço,Municipal,6,1,1,0,confirmado,7c7cf0b4b9c8bd3230157aceb08eb8c6c164d1fe44e536bfc5fa4296a9bdca22,2026-10-25
+es/56251/0054/0609,ES,56251,0054,0609,2,Preso Provisório,Municipal,34,1,1,0,confirmado,7c7cf0b4b9c8bd3230157aceb08eb8c6c164d1fe44e536bfc5fa4296a9bdca22,2026-10-25

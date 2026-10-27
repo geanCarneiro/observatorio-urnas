@@ -11,6 +11,7 @@ from pathlib import Path
 
 from analyze_section import analyze_collection
 from election_turns import turn_for_pleito
+from temporary_transfer import write_reconciliation
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -97,6 +98,14 @@ def extract_collection(acquisition_path: Path, bu_schema: Path, rdv_schema: Path
     if section_diagnostics:
         acquisition["analysis_diagnostics"] = section_diagnostics
         _write_json(acquisition_path, acquisition)
+
+    transfer_reconciliation = extraction.get("transferencia_temporaria")
+    if transfer_reconciliation and transfer_reconciliation.get("turno") == 2:
+        output_root = acquisition_path.parent
+        write_reconciliation([transfer_reconciliation],
+            output_root / "transferencia-temporaria-reconciliacao.json",
+            output_root / "transferencia-temporaria-reconciliacao.csv",
+            "section_analysis_log_sessions")
 
 
 def main() -> int:

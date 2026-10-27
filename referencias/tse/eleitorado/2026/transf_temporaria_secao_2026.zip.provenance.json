@@ -1,0 +1,41 @@
+{
+  "source": "TSE CKAN",
+  "ckan_api_url": "https://dadosabertos.tse.jus.br/api/3/action/resource_show?id=4162f440-1037-4b36-9529-9544120604fa",
+  "resource_id": "4162f440-1037-4b36-9529-9544120604fa",
+  "resource_metadata": {
+    "cache_last_updated": null,
+    "cache_url": null,
+    "created": "2026-09-11T17:50:15.275286",
+    "datastore_active": false,
+    "description": "Todas as UFs",
+    "format": "CSV",
+    "hash": "",
+    "id": "4162f440-1037-4b36-9529-9544120604fa",
+    "last_modified": null,
+    "metadata_modified": "2026-09-11T17:51:11.999409",
+    "mimetype": "application/zip",
+    "mimetype_inner": null,
+    "name": "Transferência temporária do eleitorado por seção - 2026",
+    "package_id": "b7ff5e07-8660-4c4d-a64b-ebf626e33f27",
+    "position": 4,
+    "resource_type": null,
+    "size": null,
+    "state": "active",
+    "url": "https://cdn.tse.jus.br/estatistica/sead/odsele/perfil_eleitor_tte/transf_temporaria_secao_2026.zip",
+    "url_type": ""
+  },
+  "download": {
+    "final_url": "https://cdn.tse.jus.br/estatistica/sead/odsele/perfil_eleitor_tte/transf_temporaria_secao_2026.zip",
+    "http_status": 200,
+    "content_type": "application/zip",
+    "content_length": "23039781",
+    "last_modified": "Mon, 26 Oct 2026 09:32:17 GMT",
+    "etag": "\"15f8f25-65ebb0183a55d\"",
+    "server_date": "Tue, 27 Oct 2026 04:47:24 GMT"
+  },
+  "obtained_at_utc": "2026-10-27T04:47:25.690148+00:00",
+  "path": "referencias/tse/eleitorado/2026/transf_temporaria_secao_2026.zip",
+  "size_bytes": 23039781,
+  "sha256": "7c7cf0b4b9c8bd3230157aceb08eb8c6c164d1fe44e536bfc5fa4296a9bdca22",
+  "resource_metadata_response_date": "Tue, 27 Oct 2026 04:47:24 GMT"
+}

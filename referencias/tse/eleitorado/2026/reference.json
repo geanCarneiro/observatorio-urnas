@@ -1,0 +1,12 @@
+{
+  "resource_id": "4162f440-1037-4b36-9529-9544120604fa",
+  "current_zip": "transf_temporaria_secao_2026.zip",
+  "versions": [
+    {
+      "zip_file": "transf_temporaria_secao_2026.zip",
+      "sha256": "7c7cf0b4b9c8bd3230157aceb08eb8c6c164d1fe44e536bfc5fa4296a9bdca22",
+      "size_bytes": 23039781,
+      "obtained_at_utc": "2026-10-27T04:47:25.690148+00:00"
+    }
+  ]
+}

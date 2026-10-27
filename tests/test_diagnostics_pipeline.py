@@ -13,7 +13,8 @@ import asn1tools
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from analyze_section import (analyze_collection, closure_sequence_matches_observed_order,
-    log_bu_reconciliation_diagnostics, parse_cuts, process_log_file)
+    log_bu_reconciliation_diagnostics, parse_cuts, process_log_file,
+    reconcile_log_metrics, reconstruct_voting_sessions)
 from analyze_sections import analyze_sections
 from collect_sections import collect_sections
 from consolidate_diagnostics import consolidate_paths
@@ -74,6 +75,112 @@ class DiagnosticPipelineTests(unittest.TestCase):
             self.assertEqual(result["events_by_date"]["2026-10-25"]["event_counts"]["voto_computado"], 1)
             self.assertEqual(result["activity_after_clock_cuts_by_date"]["2026-10-04"]["habilitacao_a_partir_de_17h00"], 1)
             self.assertEqual(result["events"][0]["at_or_after_clock_cuts"], ["17:00"])
+
+    def test_nested_jez_logs_are_recursive_deduplicated_and_keep_source_equipment_identity(self):
+        def zipped_log(lines, nested=()):
+            output = io.BytesIO()
+            with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                if lines is not None:
+                    archive.writestr("logd.dat", "\n".join(lines) + "\n")
+                for name, body in nested:
+                    archive.writestr(name, body)
+            return output.getvalue()
+
+        nested = zipped_log([
+            "25/10/2026 09:00:01\tx\tx\tx\tEleitor foi habilitado",
+            "25/10/2026 09:00:02\tx\tx\tx\tVotação suspensa",
+            "25/10/2026 09:00:03\tx\tx\tx\tFalha durante a votação",
+        ])
+        alternate_packaging = io.BytesIO()
+        with zipfile.ZipFile(alternate_packaging, "w", compression=zipfile.ZIP_STORED) as archive:
+            archive.writestr("logd.dat", "25/10/2026 09:00:01\tx\tx\tx\tEleitor foi habilitado\n"
+                "25/10/2026 09:00:02\tx\tx\tx\tVotação suspensa\n"
+                "25/10/2026 09:00:03\tx\tx\tx\tFalha durante a votação\n")
+        root_raw = zipped_log([
+            "25/10/2026 08:00:01\tx\tx\tx\tEleitor foi habilitado",
+            "25/10/2026 08:00:02\tx\tx\tx\tVoto confirmado para [Governador]",
+            "25/10/2026 08:00:03\tx\tx\tx\tO voto do eleitor foi computado",
+        ], (("urna-anterior.jez", nested), ("copia-urna-anterior.jez", alternate_packaging.getvalue())))
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "urna-atual.jez"
+            path.write_bytes(root_raw)
+            result = process_log_file(path, {"sha256": hashlib.sha256(root_raw).hexdigest()},
+                "es/56251/0054/0509", [])
+
+        self.assertEqual(result["event_counts"]["habilitacao"], 2)
+        self.assertEqual(result["event_counts"]["suspensao"], 1)
+        self.assertEqual(result["event_counts"]["falha"], 1)
+        self.assertEqual(result["event_counts"]["voto_computado"], 1)
+        self.assertEqual(result["nested_archive_count"], 2)
+        nested_source = next(item for item in result["source_files"] if item["sha256"] != hashlib.sha256(root_raw).hexdigest())
+        nested_event = next(event for event in result["events"] if event["event_type"] == "suspensao")
+        self.assertEqual(len(nested_event["source_aliases"]), 2)
+        self.assertEqual(result["events"][-1]["event_timestamp_raw"], "25/10/2026 09:00:03")
+        self.assertTrue(result["events"][-1]["equipment_identifier"].startswith("log-stream-sha256:"))
+
+    def test_sessions_separate_habilitation_confirmation_computation_and_state_events(self):
+        def event(line, kind, time):
+            return {"line_number": line, "event_type": kind, "event_timestamp_raw": time,
+                "event_date": "25/10/2026", "equipment_identifier": "device-hash"}
+
+        result = reconstruct_voting_sessions([
+            event(1, "voto_confirmado_governador", "25/10/2026 08:00:01"),
+            event(2, "habilitacao", "25/10/2026 08:01:00"),
+            event(3, "voto_confirmado_governador", "25/10/2026 08:01:10"),
+            event(4, "interrupcao", "25/10/2026 08:01:15"),
+            event(5, "voto_computado", "25/10/2026 08:01:20"),
+            event(6, "habilitacao", "25/10/2026 08:02:00"),
+            event(7, "voto_confirmado_presidente", "25/10/2026 08:02:10"),
+        ])
+
+        self.assertEqual(len(result["sessions"]), 2)
+        self.assertEqual(result["sessions"][0]["status"], "computed")
+        self.assertEqual(result["sessions"][0]["cargo_confirmations"]["governador"][0]["line_number"], 3)
+        self.assertEqual(result["sessions"][0]["state_events"][0]["event_type"], "interrupcao")
+        self.assertFalse(result["sessions"][1]["computed"])
+        self.assertEqual(result["sessions"][1]["status"], "incomplete_at_end_of_log")
+        self.assertEqual(result["unassigned_events"][0]["reason"], "confirmation_without_open_habilitation")
+
+    def test_reconciliation_never_uses_habilitations_and_marks_cargo_confirmation_deltas_inconclusive(self):
+        def event(line, kind):
+            return {"line_number": line, "event_type": kind, "event_timestamp_raw": f"25/10/2026 08:00:{line:02d}",
+                "event_date": "2026-10-25", "equipment_identifier": "device-hash"}
+
+        events = [event(1, "habilitacao"), event(2, "habilitacao"), event(3, "habilitacao"),
+                  event(4, "voto_confirmado_governador"), event(5, "voto_confirmado_presidente"),
+                  event(6, "voto_computado"), event(7, "habilitacao"), event(8, "voto_computado")]
+        sessions = reconstruct_voting_sessions(events)["sessions"]
+        bu = {"qtd_eleitores_compareceram": 2, "elections": [{"id_eleicao": 304, "results": [{"cargos": [
+            {"cargo_kind": "cargoConstitucional", "cargo": 1, "qtd_votos_bu": 2},
+            {"cargo_kind": "cargoConstitucional", "cargo": 3, "qtd_votos_bu": 2},
+        ]}]}]}
+        rdvs = [{"elections": [{"election_id": 304, "cargos": [
+            {"cargo_kind": "cargoConstitucional", "cargo_code": 1, "record_count": 2},
+            {"cargo_kind": "cargoConstitucional", "cargo_code": 3, "record_count": 2},
+        ]}], "reconciliation_with_bu": {"by_cargo": [
+            {"election_id": 304, "cargo_kind": "cargoConstitucional", "cargo_code": 1,
+             "status": "matched", "divergence_rdv_minus_bu": 0},
+            {"election_id": 304, "cargo_kind": "cargoConstitucional", "cargo_code": 3,
+             "status": "matched", "divergence_rdv_minus_bu": 0},
+        ]}}]
+
+        report = reconcile_log_metrics(events, sessions, bu, rdvs, "2026-10-25")
+        self.assertEqual(report["status"], "matched")
+        self.assertEqual(report["by_metric"]["habilitacoes"]["comparison_status"], "not_compared")
+        self.assertEqual(report["by_metric"]["votos_computados_vs_bu_comparecimento"]["log_event_count"], 2)
+        self.assertEqual(report["by_metric"]["votos_computados_vs_bu_comparecimento"]["status"], "matched")
+        self.assertTrue(all(cargo["comparison_status"] == "inconclusive" for cargo in report["by_cargo"]))
+        self.assertTrue(all(cargo["rdv_bu_reconciliation_status"] == "matched" for cargo in report["by_cargo"]))
+        self.assertEqual({cargo["cargo"] for cargo in report["by_cargo"]}, {"governador", "presidente"})
+
+    def test_unassigned_computed_event_makes_log_bu_reconciliation_inconclusive(self):
+        event = {"line_number": 4, "event_type": "voto_computado", "event_timestamp_raw": "25/10/2026 08:00:04",
+            "event_date": "2026-10-25", "equipment_identifier": "device-hash"}
+        sessions = reconstruct_voting_sessions([event])["sessions"]
+        report = reconcile_log_metrics([event], sessions, {"qtd_eleitores_compareceram": 1, "elections": []}, [], "2026-10-25")
+        self.assertEqual(report["by_metric"]["votos_computados_vs_bu_comparecimento"]["log_event_count"], 1)
+        self.assertEqual(report["by_metric"]["votos_computados_vs_bu_comparecimento"]["status"], "inconclusive")
+        self.assertIn("could not be assigned", report["by_metric"]["votos_computados_vs_bu_comparecimento"]["reason"])
 
     def test_closure_order_matches_observed_log_sequence_and_allows_repeated_commands(self):
         self.assertTrue(closure_sequence_matches_observed_order([
@@ -392,9 +499,9 @@ class DiagnosticPipelineTests(unittest.TestCase):
                     "numeroSerieFC": b"1234", "identificadorGeradorMidia": {"nome": "fixture", "serialCertificadoTPM": "fixture", "serialInstalacao": "fixture"},
                     "dataHoraCarga": "20261001T120000", "codigoCarga": "fixture"}},
                 "tipoArquivo": "votacaoUE", "numeroSerieFV": b"5678"}
-            bu = {"cabecalho": {"dataGeracao": "20261026T120000", "idEleitoral": ("idPleito", 304)},
-                "fase": "oficial", "urna": urna, "identificacaoSecao": identity, "dataHoraEmissao": "20261026T120000",
-                "dadosSecaoSA": ("dadosSecao", {"dataHoraAbertura": "20261026T090000", "dataHoraEncerramento": "20261026T170000"}),
+            bu = {"cabecalho": {"dataGeracao": "20261025T120000", "idEleitoral": ("idPleito", 3221)},
+                "fase": "oficial", "urna": urna, "identificacaoSecao": identity, "dataHoraEmissao": "20261025T120000",
+                "dadosSecaoSA": ("dadosSecao", {"dataHoraAbertura": "20261025T090000", "dataHoraEncerramento": "20261025T170000"}),
                 "qtdEleitoresCompareceram": 0, "resultadosVotacaoPorEleicao": [], "historicoCodigosCarga": []}
             content = spec.encode("EntidadeBoletimUrna", bu)
             envelope = {"cabecalho": bu["cabecalho"], "fase": "oficial",
@@ -404,7 +511,7 @@ class DiagnosticPipelineTests(unittest.TestCase):
             bu_path.write_bytes(bu_raw)
             log_path = root / "synthetic-log.zip"
             with zipfile.ZipFile(log_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-                archive.writestr("logd.dat", "26/10/2026 17:01:00\tx\tx\tx\tEleitor foi habilitado\n")
+                archive.writestr("logd.dat", "25/10/2026 17:01:00\tx\tx\tx\tEleitor foi habilitado\n")
             files = []
             for kind, path in (("bu", bu_path), ("log", log_path)):
                 raw = path.read_bytes()
@@ -414,11 +521,22 @@ class DiagnosticPipelineTests(unittest.TestCase):
             collection.write_text(json.dumps({"section_key": "es/56251/0054/0509", "files": files,
                 "diagnostics": [], "file_states": []}), encoding="utf-8")
 
-            report = analyze_collection(collection, parse_cuts([]), schema, ROOT / "schemas/rdv.asn1")
+            class FakeTransferIndex:
+                status = "complete"
+                expected_sha256 = "synthetic-reference-hash"
+
+                def metadata(self): return {"resource_id": "fixture", "zip_sha256": self.expected_sha256}
+                def section_breakdown(self, *_args): return []
+                def federal_count(self, *_args): return 0
+
+            with patch("temporary_transfer.load_reference", return_value=FakeTransferIndex()):
+                report = analyze_collection(collection, parse_cuts([]), schema, ROOT / "schemas/rdv.asn1")
             codes = {item["code"] for item in report["diagnostics"]}
-            self.assertNotIn("CROSS_ANALYSIS_FAILED", codes)
+            self.assertNotIn("CROSS_ANALYSIS_FAILED", codes, report["diagnostics"])
             self.assertIsNotNone(report["reconciliation"]["log_bu"])
             self.assertIn("event_counts_by_date", report["file_processing"]["logs"][0])
+            self.assertEqual(report["transferencia_temporaria"]["status"], "dados_insuficientes")
+            self.assertEqual(report["transferencia_temporaria"]["log_metric_detail"]["incomplete_session_count"], 1)
 
 
 if __name__ == "__main__":
