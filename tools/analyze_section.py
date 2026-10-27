@@ -233,9 +233,100 @@ def analyze(log_path: Path, bu_path: Path, collection_path: Path, cuts: list[str
                         and f'{bu_identity["zona"]:04d}' == expected[2]
                         and f'{bu_identity["secao"]:04d}' == expected[3])
     event_counts = counts_by_date.get(bu["election_date"], Counter())
+    event_date_present = bu["election_date"] in counts_by_date
     attendance_comparisons = {
-        "habilitacoes_vs_bu_attendance": {"log": event_counts.get("habilitacao", 0), "bu": bu["qtd_eleitores_compareceram"]},
-        "votos_computados_vs_bu_attendance": {"log": event_counts.get("voto_computado", 0), "bu": bu["qtd_eleitores_compareceram"]},
+        "habilitacoes_vs_bu_attendance": {"log": event_counts.get("habilitacao", 0), "bu": bu["qtd_eleitores_compareceram"], "event_date_present": event_date_present},
+        "votos_computados_vs_bu_attendance": {"log": event_counts.get("voto_computado", 0), "bu": bu["qtd_eleitores_compareceram"], "event_date_present": event_date_present},
+    }
+
+    for comparison in attendance_comparisons.values():
+        comparison["divergence_log_minus_bu"] = comparison["log"] - comparison["bu"]
+    # Confirmation events are retained as their own measurements. Their counts are
+    # not treated as BU vote totals: log semantics and BU tally semantics differ.
+    confirmation_events = {
+        "presidente": "voto_confirmado_presidente",
+        "governador": "voto_confirmado_governador",
+    }
+    confirmation_counts = {
+        cargo: event_counts.get(event_type, 0)
+        for cargo, event_type in confirmation_events.items()
+    }
+    detail_sum_matches = (bu["attendance_detail_sum"] is None or
+                          bu["attendance_detail_sum"] == bu["qtd_eleitores_compareceram"])
+    section_times = bu["section_times"] or {}
+    closing_raw = section_times.get("dataHoraEncerramento")
+    closing_event_raw = (datetime.strptime(closing_raw, "%Y%m%dT%H%M%S").strftime("%d/%m/%Y %H:%M:%S")
+                         if closing_raw else None)
+    completion_matches = any(e["event_type"] == "conclusao_encerramento" and
+                             e["event_timestamp_raw"] == closing_event_raw for e in events)
+    bu_time_validation = {
+        "status": "clock_agreement" if completion_matches else "clock_disagreement",
+        "opening_raw": section_times.get("dataHoraAbertura"),
+        "closing_raw": closing_raw,
+        "log_closure_matches_bu_closing": completion_matches,
+        "timezone": "timezone/UTC offset remains unvalidated; same-device clock agreement does not identify a timezone",
+    }
+    substitution_signal = (bu["urn_type"] in {"contingencia", "reservaSecao", "reservaEncerrandoSecao"}
+                          or bu["unique_load_codes"] > 1 or substitution_keyword_matches > 0)
+    substitution_validation = {
+        "status": "review_signal" if substitution_signal else "no_signal_detected_in_available_fields",
+        "urn_type": bu["urn_type"],
+        "manifest_hash_entries": len(collection.get("manifest_payload_unverified", {}).get("hashes", [])),
+        "load_history_entries": bu["load_history_entries"],
+        "unique_load_codes": bu["unique_load_codes"],
+        "log_keyword_signal_count": substitution_keyword_matches,
+        "scope_note": "absence of a signal is not proof that no substitution occurred",
+    }
+    manifest_path = collection_path.parent / "manifest.aux.jws"
+    manifest_matches = (manifest_path.exists() and collection.get("manifest_sha256") and
+                        sha256(manifest_path) == collection["manifest_sha256"])
+    log_matches = sha256(log_path) == metadata.get("sha256")
+    bu_matches = sha256(bu_path) == bu_metadata.get("sha256")
+    reconciliation_status = ("partial" if not event_date_present else
+                              "matched" if all(v["divergence_log_minus_bu"] == 0 for v in attendance_comparisons.values()) and detail_sum_matches
+                              else "divergence")
+    return {
+        "report_schema_version": 4,
+        "section_key": collection["section_key"],
+        "acquisition_id": collection.get("acquired_at_utc"),
+        "source_files": {"manifest_sha256": collection.get("manifest_sha256"),
+                         "log_sha256": metadata.get("sha256"), "bu_sha256": bu_metadata.get("sha256"),
+                         "rdv_sha256": [item.get("source", {}).get("sha256") for item in rdvs]},
+        "bu_schema": {"source": BU_SCHEMA_SOURCE, "bundle_sha256": BU_SCHEMA_BUNDLE_SHA256,
+                      "schema_sha256": sha256(schema_path), "expected_schema_sha256": BU_SCHEMA_SHA256,
+                      "matches_official_copy": sha256(schema_path) == BU_SCHEMA_SHA256},
+        "bu_attendance": {"total": bu["qtd_eleitores_compareceram"], "detail": bu["attendance_detail"],
+                          "detail_sum": bu["attendance_detail_sum"], "detail_sum_matches_total": detail_sum_matches,
+                          "urn_type": bu["urn_type"]},
+        "validation": {
+            "integrity": {"manifest_sha256_matches_collection": bool(manifest_matches),
+                           "log_sha256_matches_collection": log_matches,
+                           "bu_sha256_matches_collection": bu_matches,
+                           "log_zip_crc": "valid", "jws_signature": "unverified"},
+            "timezone": {"status": "unvalidated", "reason": "log timestamps contain no timezone; no external clock reference has been authenticated"},
+            "bu_clock_crosscheck": bu_time_validation,
+            "urn_substitution": substitution_validation,
+            "bu_envelope_identity": {"status": "matched" if identity_matches else "mismatch", **bu_identity},
+            "bu_asn1": "decoded",
+            "bu_attendance_detail_sum_matches": detail_sum_matches,
+            "bu_reconciliation": {
+                "status": reconciliation_status,
+                "comparison_semantics": "Raw event counts are compared with BU attendance as diagnostic counts; confirmation events are not equated to vote totals.",
+                "by_attendance_metric": attendance_comparisons,
+                "confirmation_event_counts": confirmation_counts,
+            "bu_election_date": bu["election_date"],
+            "log_contains_bu_election_date": event_date_present,
+                "by_cargo": [],
+            },
+        },
+        "clock_cuts_hhmm_raw": cuts,
+        "event_semantics": EVENTS,
+        "event_count_total": len(events),
+        "events_by_date": by_date,
+        "relevant_events": events,
+        "rdv": rdvs,
+        "privacy": {"individual_log_fields_excluded": True, "raw_message_or_elector_identifier_included": False},
+        "limitations": ["log clock timezone and drift unvalidated", "JWS signature unverified", "possible urn replacement screening is not exhaustive", "event counts do not imply semantic equivalence or causality"],
     }
 
 
@@ -244,6 +335,8 @@ def process_log_file(path: Path, metadata: dict, section: str, cuts: list[str]) 
     events = []
     counts = Counter()
     after_cuts = Counter()
+    counts_by_date = defaultdict(Counter)
+    after_cuts_by_date = defaultdict(Counter)
     file_hash = sha256_file(path)
     if file_hash != metadata.get("sha256"):
         diagnostics.append(diagnostic(code="LOG_SHA256_MISMATCH", stage="integrity_validation", operation="verify_sha256",
@@ -319,12 +412,30 @@ def process_log_file(path: Path, metadata: dict, section: str, cuts: list[str]) 
             "event_type": event_type, "event_timestamp_raw": fields[0], "event_timezone": "unknown",
             "event_timestamp_utc": None, "event_timestamp_brt": None, "parser_status": "allowlist_match"})
         counts[event_type] += 1
+        event_date = timestamp.strftime("%Y-%m-%d")
+        counts_by_date[event_date][event_type] += 1
         if event_type in {"habilitacao", "voto_computado", "voto_confirmado_governador", "voto_confirmado_presidente"}:
             for cut in cuts:
                 if hhmm >= cut:
-                    after_cuts[f"{event_type}_a_partir_de_{cut.replace(':', 'h')}"] += 1
+                    key = f"{event_type}_a_partir_de_{cut.replace(':', 'h')}"
+                    after_cuts[key] += 1
+                    after_cuts_by_date[event_date][key] += 1
+    by_date = {}
+    for event_date in sorted(counts_by_date):
+        day = [event for event in events if event["event_timestamp_raw"].startswith(
+            datetime.strptime(event_date, "%Y-%m-%d").strftime("%d/%m/%Y"))]
+        by_date[event_date] = {
+            "event_counts": dict(counts_by_date[event_date]),
+            "last_habilitacao_raw": max((e["event_timestamp_raw"] for e in day if e["event_type"] == "habilitacao"), default=None),
+            "last_voto_computado_raw": max((e["event_timestamp_raw"] for e in day if e["event_type"] == "voto_computado"), default=None),
+            "activity_after_clock_cuts": dict(after_cuts_by_date[event_date]),
+            "relevant_events": day,
+        }
     return {"status": "processed_with_diagnostics" if diagnostics else "processed", "events": events,
         "diagnostics": diagnostics, "event_counts": dict(counts), "activity_after_clock_cuts": dict(after_cuts),
+        "event_counts_by_date": {date: dict(day) for date, day in counts_by_date.items()},
+        "activity_after_clock_cuts_by_date": {date: dict(day) for date, day in after_cuts_by_date.items()},
+        "events_by_date": by_date,
         "substitution_keyword_matches": substitution_matches, "sha256": file_hash,
         "size_bytes": path.stat().st_size, "detected_format": "ZIP", "version": None, "urn_model": None}
 
@@ -372,7 +483,20 @@ def analyze_collection(collection_path: Path, cuts: list[str], bu_schema_path: P
         entries = [item for item in entries if item.get("type") != "bu" or
                    (collection_path.parent / item.get("relative_path", "")).resolve() in bu_filter]
     diagnostics = list(collection.get("diagnostics", []))
-    states = list(collection.get("file_states", []))
+    has_vsc_entry = any((item.get("type") == "vota.vsc" or
+                         (item.get("type") == "vota" and str(item.get("name", "")).lower().endswith(".vsc")))
+                        for item in entries)
+    states = []
+    for original_state in collection.get("file_states", []):
+        state = dict(original_state)
+        if state.get("type") == "vota" and str(state.get("name", "")).lower().endswith(".vsc"):
+            state["type"] = "vota.vsc"
+            if state.get("status") == "not_processed":
+                state["status"] = "downloaded"
+                state["reason"] = "Preserved by the earlier collector; its manifest type alias was not recognized during collection."
+        if has_vsc_entry and state.get("type") == "vota.vsc" and not state.get("name") and state.get("status") == "not_applicable":
+            continue
+        states.append(state)
     manifest_path = collection_path.parent / "manifest.aux.jws"
     signature_codes = {item.get("code") for item in diagnostics if item.get("error_type") == "signature_cryptographic"}
     if collection.get("signature_status") != "verified" and not signature_codes:
@@ -400,8 +524,25 @@ def analyze_collection(collection_path: Path, cuts: list[str], bu_schema_path: P
     log_results = []
     bu_results = []
     rdv_results = []
+    signature_bundles = []
     for item in entries:
         file_type = item.get("type")
+        if file_type == "vota" and str(item.get("name", "")).lower().endswith(".vsc"):
+            file_type = "vota.vsc"
+        if file_type == "vota.vsc":
+            relative = item.get("relative_path")
+            path = collection_path.parent / relative if relative else None
+            exists = bool(path and path.exists())
+            signature_bundles.append({
+                "name": item.get("name"), "path": str(path) if path else None,
+                "status": "preserved_not_interpreted" if exists else "missing",
+                "sha256": sha256_file(path) if exists else None,
+                "size_bytes": path.stat().st_size if exists else None,
+                "purpose": "TSE software/hardware signature bundle and signed-file hash declarations",
+                "signature_verification": "not_performed",
+                "scope_note": "Original bytes are preserved; embedded signatures and certificates are not interpreted in this release.",
+            })
+            continue
         if file_type not in {"bu", "rdv", "log"}:
             continue
         relative_path = item.get("relative_path")
@@ -522,6 +663,13 @@ def analyze_collection(collection_path: Path, cuts: list[str], bu_schema_path: P
             legacy_report = analyze(first_log, first_bu, collection_path, cuts, bu_schema_path)
             diagnostics.extend(log_bu_reconciliation_diagnostics(legacy_report["validation"], section, first_log,
                 legacy_report["bu_attendance"].get("urn_type")))
+            if legacy_report["validation"]["bu_reconciliation"].get("status") == "partial":
+                diagnostics.append(diagnostic(code="LOG_BU_DATE_NOT_PRESENT", stage="reconciliation",
+                    operation="select_log_events_for_bu_date", error_type="reconciliation",
+                    cause="No allowlisted event was found on the BU emission date, so log-to-BU count comparison is incomplete.",
+                    recoverability="indeterminate", section=section, file_type="log", file_name=first_log.name,
+                    file_path=str(first_log), detected_format="ZIP/logd.dat", urn_model=legacy_report["bu_attendance"].get("urn_type"),
+                    context={"bu_election_date": legacy_report["validation"]["bu_reconciliation"].get("bu_election_date")}))
             if not legacy_report["validation"].get("bu_attendance_detail_sum_matches", True):
                 diagnostics.append(diagnostic(code="BU_ATTENDANCE_DETAIL_RECONCILIATION_DIVERGENCE", stage="reconciliation",
                     operation="reconcile_bu_attendance_fields", error_type="reconciliation",
@@ -567,12 +715,13 @@ def analyze_collection(collection_path: Path, cuts: list[str], bu_schema_path: P
     validity = "valid" if overall_status == "complete" and not diagnostics else "not_valid" if overall_status == "failed" else "not_validated"
     report = legacy_report or {"report_schema_version": 4, "section_key": section, "acquisition_id": collection.get("acquired_at_utc")}
     report.update({"report_schema_version": 4, "overall_status": overall_status, "validity": validity,
+        "data_id": collection.get("data_id"), "turno": collection.get("turno"),
         "source_files": {"manifest_sha256": collection.get("manifest_sha256"),
             "log_sha256": [item.get("sha256") for item in log_results], "bu_sha256": [item.get("sha256") for item in bu_results],
             "rdv_sha256": [item.get("source", {}).get("sha256") for item in rdv_results]},
         "file_processing": {"logs": log_results, "bus": bu_results, "rdvs": rdv_results,
             "states": states, "unprocessed_types": [s["type"] for s in states if s.get("status") == "not_processed"]},
-        "rdv_files": rdv_results, "diagnostics": diagnostics,
+        "rdv_files": rdv_results, "signature_bundles": signature_bundles, "diagnostics": diagnostics,
         "diagnostic_summary": summarize_diagnostics(diagnostics, states),
         "reconciliation": {"log_bu": (legacy_report or {}).get("validation", {}).get("bu_reconciliation"),
             "rdv_bu": [item.get("reconciliation_with_bu") for item in rdv_results]},

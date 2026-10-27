@@ -121,6 +121,13 @@ def identifier(value: str, width: int, label: str) -> str:
     return value.zfill(width)
 
 
+def canonical_manifest_file_type(raw_type: object, name: object) -> str:
+    """Resolve the concrete format when the manifest uses a broad type code."""
+    if raw_type == "vota" and isinstance(name, str) and name.lower().endswith(".vsc"):
+        return "vota.vsc"
+    return raw_type if isinstance(raw_type, str) else "unknown"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--uf", required=True, type=lambda x: x.lower())
@@ -143,7 +150,8 @@ def main() -> int:
     manifest_url = f"{base}/{key}/{stem}"
     acquisition_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     root = args.output / key / "runs" / acquisition_id
-    run = {"section_key": key, "data_id": args.data_id, "manifest_url": manifest_url,
+    run = {"section_key": key, "data_id": args.data_id,
+           "turno": {"3220": "1", "3221": "2"}.get(args.data_id), "manifest_url": manifest_url,
            "acquired_at_utc": datetime.now(timezone.utc).isoformat(), "signature_status": "unverified",
            "files": [], "file_states": [], "diagnostics": []}
     manifest_path = root / "manifest.aux.jws"
@@ -246,7 +254,9 @@ def main() -> int:
                         context={"entry_type": type(item).__name__}))
                     continue
                 raw_file_type, name = item.get("tp"), item.get("nm")
-                file_type = raw_file_type if isinstance(raw_file_type, str) else "unknown"
+                # The official manifest identifies signature bundles as tp=vota;
+                # the .vsc filename carries the concrete format.
+                file_type = canonical_manifest_file_type(raw_file_type, name)
                 if not isinstance(raw_file_type, str):
                     run["diagnostics"].append(diagnostic(code="COLLECT_MANIFEST_FILE_TYPE_INVALID", stage="semantic_validation",
                         operation="validate_manifest_file_entry", error_type="semantic_validation",
@@ -254,11 +264,7 @@ def main() -> int:
                         file_type="jws", file_name=manifest_path.name, file_path=str(manifest_path),
                         position={"entry_index": entry_index, "file_index": file_index},
                         context={"file_type_value": repr(raw_file_type)}))
-                if file_type == "vota.vsc":
-                    run["file_states"].append(file_state(file_type=file_type, name=name, section=key,
-                        status="not_applicable", reason="This file format is intentionally outside the analysis scope."))
-                    continue
-                if file_type not in ("bu", "log", "rdv"):
+                if file_type not in ("bu", "log", "rdv", "vota.vsc"):
                     run["diagnostics"].append(diagnostic(code="COLLECT_FILE_TYPE_UNSUPPORTED", stage="format_detection",
                         operation="select_manifest_file_type", error_type="format_incompatibility",
                         cause="The manifest lists a file type not supported by the collector.", recoverability="permanent",
@@ -328,8 +334,9 @@ def main() -> int:
                 operation="discover_manifest_files", error_type="missing", cause="No corresponding file entry exists in the manifest.",
                 recoverability="indeterminate", section=key, file_type=file_type, file_name=None, file_path=None,
                 detected_format=None, context={"manifest_path": str(manifest_path)}))
-    run["file_states"].append(file_state(file_type="vota.vsc", name=None, section=key, status="not_applicable",
-        reason="This format is outside the configured collection scope."))
+    if "vota.vsc" not in listed_types:
+        run["file_states"].append(file_state(file_type="vota.vsc", name=None, section=key, status="missing",
+            reason="No signature bundle was listed in the JWS manifest."))
     state_path = manifest_path.with_suffix(manifest_path.suffix + ".partial") if manifest_status == "partial" else manifest_path
     run["file_states"].append(file_state(file_type="jws", name=manifest_path.name, section=key,
         status=manifest_status, path=str(state_path), sha256=hashlib.sha256(state_path.read_bytes()).hexdigest() if state_path.exists() else run.get("manifest_sha256"),

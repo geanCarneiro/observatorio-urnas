@@ -10,11 +10,11 @@ from unittest.mock import patch
 import asn1tools
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from analyze_section import analyze_collection, log_bu_reconciliation_diagnostics, parse_cuts
+from analyze_section import analyze_collection, log_bu_reconciliation_diagnostics, parse_cuts, process_log_file
 from analyze_sections import analyze_sections
 from collect_sections import collect_sections
 from consolidate_diagnostics import consolidate_paths
-from collect_section import DownloadIncompleteError, fetch
+from collect_section import DownloadIncompleteError, canonical_manifest_file_type, fetch
 from diagnostics import summarize_diagnostics, verify_jws_signature
 
 
@@ -22,6 +22,26 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DiagnosticPipelineTests(unittest.TestCase):
+    def test_official_vota_type_with_vsc_suffix_is_recognized_as_signature_bundle(self):
+        self.assertEqual(canonical_manifest_file_type("vota", "es-p0001-s0001-vota.vsc"), "vota.vsc")
+        self.assertEqual(canonical_manifest_file_type("bu", "section.bu"), "bu")
+
+    def test_log_activity_is_partitioned_by_event_date(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "log.zip"
+            with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("logd.dat", "\n".join([
+                    "04/10/2026 17:01:00\tx\tx\tx\tEleitor foi habilitado",
+                    "25/10/2026 17:02:00\tx\tx\tx\tEleitor foi habilitado",
+                    "25/10/2026 17:03:00\tx\tx\tx\tO voto do eleitor foi computado",
+                ]))
+            item = {"sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+            result = process_log_file(path, item, "es/56251/0054/0509", parse_cuts(["17:00"]))
+            self.assertEqual(result["event_counts_by_date"]["2026-10-04"]["habilitacao"], 1)
+            self.assertEqual(result["event_counts_by_date"]["2026-10-25"]["habilitacao"], 1)
+            self.assertEqual(result["events_by_date"]["2026-10-25"]["event_counts"]["voto_computado"], 1)
+            self.assertEqual(result["activity_after_clock_cuts_by_date"]["2026-10-04"]["habilitacao_a_partir_de_17h00"], 1)
+
     def test_corrupt_truncated_and_unknown_files_do_not_stop_other_inputs(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -195,6 +215,45 @@ class DiagnosticPipelineTests(unittest.TestCase):
             self.assertEqual(report["overall_status"], "partial")
             self.assertNotEqual(report["validity"], "valid")
             self.assertIn("not_processed", {state["status"] for state in report["file_processing"]["states"]})
+
+    def test_log_bu_cross_analysis_returns_structured_result_instead_of_none(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            schema = ROOT / "schemas/bu.asn1"
+            spec = asn1tools.compile_files(str(schema), codec="ber")
+            identity = {"municipioZona": {"municipio": 56251, "zona": 54}, "local": 1, "secao": 509}
+            urna = {"tipoUrna": "secao", "versaoVotacao": "synthetic", "correspondenciaResultado": {
+                "identificacao": ("identificacaoSecaoEleitoral", identity), "carga": {"numeroInternoUrna": 1,
+                    "numeroSerieFC": b"1234", "identificadorGeradorMidia": {"nome": "fixture", "serialCertificadoTPM": "fixture", "serialInstalacao": "fixture"},
+                    "dataHoraCarga": "20261001T120000", "codigoCarga": "fixture"}},
+                "tipoArquivo": "votacaoUE", "numeroSerieFV": b"5678"}
+            bu = {"cabecalho": {"dataGeracao": "20261026T120000", "idEleitoral": ("idPleito", 304)},
+                "fase": "oficial", "urna": urna, "identificacaoSecao": identity, "dataHoraEmissao": "20261026T120000",
+                "dadosSecaoSA": ("dadosSecao", {"dataHoraAbertura": "20261026T090000", "dataHoraEncerramento": "20261026T170000"}),
+                "qtdEleitoresCompareceram": 0, "resultadosVotacaoPorEleicao": [], "historicoCodigosCarga": []}
+            content = spec.encode("EntidadeBoletimUrna", bu)
+            envelope = {"cabecalho": bu["cabecalho"], "fase": "oficial",
+                "identificacao": ("identificacaoSecaoEleitoral", identity), "tipoEnvelope": "envelopeBoletimUrna", "conteudo": content}
+            bu_raw = spec.encode("EntidadeEnvelopeGenerico", envelope)
+            bu_path = root / "synthetic-bu.dat"
+            bu_path.write_bytes(bu_raw)
+            log_path = root / "synthetic-log.zip"
+            with zipfile.ZipFile(log_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("logd.dat", "26/10/2026 17:01:00\tx\tx\tx\tEleitor foi habilitado\n")
+            files = []
+            for kind, path in (("bu", bu_path), ("log", log_path)):
+                raw = path.read_bytes()
+                files.append({"type": kind, "name": path.name, "relative_path": path.name,
+                    "sha256": hashlib.sha256(raw).hexdigest(), "size_bytes": len(raw)})
+            collection = root / "collection.json"
+            collection.write_text(json.dumps({"section_key": "es/56251/0054/0509", "files": files,
+                "diagnostics": [], "file_states": []}), encoding="utf-8")
+
+            report = analyze_collection(collection, parse_cuts([]), schema, ROOT / "schemas/rdv.asn1")
+            codes = {item["code"] for item in report["diagnostics"]}
+            self.assertNotIn("CROSS_ANALYSIS_FAILED", codes)
+            self.assertIsNotNone(report["reconciliation"]["log_bu"])
+            self.assertIn("event_counts_by_date", report["file_processing"]["logs"][0])
 
 
 if __name__ == "__main__":

@@ -14,12 +14,12 @@ O catálogo `arquivo-urna/3220/config/{uf}/{uf}-p003220-cs.jws` fornece a hierar
 ## GitHub Actions
 
 - `Coleta por abrangência` é manual (`workflow_dispatch`), aceita qualquer combinação dos quatro filtros, enumera seções e executa um lote de até 100 seções. O padrão é 10; nenhum job roda sem acionamento explícito.
-- Na interface do Actions, só UF, município, zona, seção e limite do lote são parâmetros operacionais. IDs de catálogo e de dados ficam nos padrões internos versionados (`3220` e `3221`).
+- Na interface do Actions, turno, UF, município, zona, seção e limite do lote são parâmetros operacionais. Para o primeiro turno são usados catálogo/dados `3220`; para o segundo, `3221`. A opção `ambos` gera inventários, coletas e análises separados por turno. Esses vínculos são os observados nos manifestos oficiais de 2026 e devem ser revistos para outra eleição.
 - `Piloto de coleta de seção` permanece disponível para repetição direta de uma seção.
 - Os filtros são cumulativos: somente UF inclui todos os municípios, zonas e seções daquela UF; somente município seleciona esse município em todas as UFs; campos vazios não restringem. Se o resultado ultrapassa o limite, o lote coleta os primeiros itens em ordem estável e o resumo informa que houve truncamento. A interface Action não expõe `offset`; o CLI ainda permite paginação.
 - A execução sem filtros descobre o inventário nacional, mas coleta apenas até o limite do lote, nunca o país inteiro numa única execução por padrão. Para cobrir uma área maior que o limite, o operador a divide por filtros territoriais e revê catálogo, duração, tamanho e diagnósticos entre execuções.
 - Inventário e coleta registram parâmetros, arquivos-fonte, hashes, cobertura, horários e falhas por seção; os artefatos têm retenção de 90 dias. O lote atual não é um checkpoint durável: offsets referem-se ao catálogo obtido naquela execução.
-- O processamento preserva RDV original, manifesto e metadados de aquisição. O relatório inclui registros individuais e agregações. Não relacionar registros a eleitores, horários ou logs; não tratar posição como tempo nem como chave compartilhada entre cargos. `vota.vsc` segue fora da coleta.
+- O processamento preserva RDV original, manifesto e metadados de aquisição. O relatório inclui registros individuais e agregações. Não relacionar registros a eleitores, horários ou logs; não tratar posição como tempo nem como chave compartilhada entre cargos. `vota.vsc` é o pacote de assinaturas de software/hardware e hashes de arquivos assinados; é preservado, mas sua estrutura e suas assinaturas ainda não são interpretadas/verificadas.
 - A workflow está habilitada apenas para acionamento manual e limitada a 100 seções por execução. Lotes nacionais maiores dependem de validar o padrão em todas as UFs, custo, armazenamento, assinatura e estabilidade do inventário. Filesystem efêmero do runner não é checkpoint.
 
 ## Portões de validação

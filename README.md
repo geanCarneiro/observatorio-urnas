@@ -19,7 +19,7 @@ python tools/collect_sections.py --sections inventario/section-inventory.json --
   --output dados --report reports/coleta-lote.json
 ```
 
-`--config-id` escolhe o catálogo de seções (`3220` por padrão); `--data-id` escolhe a base dos manifestos por seção (`3221` por padrão). São identificadores separados. O limite do CLI é 5.000 seções; a execução pelo Actions limita cada lote a 100. Para seções específicas, prefira os filtros geográficos, que são mais estáveis do que paginação enquanto o catálogo oficial muda.
+`--config-id` escolhe o catálogo de seções e `--data-id` escolhe a base dos manifestos por seção. Para as Eleições 2026 observadas aqui, `3220` corresponde ao primeiro turno e `3221` ao segundo; os identificadores e datas da fonte são preservados nos artefatos. O limite do CLI é 5.000 seções; a execução pelo Actions limita cada lote a 100. Para seções específicas, prefira os filtros geográficos, que são mais estáveis do que paginação enquanto o catálogo oficial muda.
 
 ## Rodar o piloto de Cariacica
 
@@ -36,7 +36,9 @@ Os dados brutos ficam em `dados/`, ignorado pelo Git. O relatório contém times
 
 ## GitHub Actions
 
-Na aba **Actions**, escolha **Coleta por abrangência**. Informe qualquer combinação de UF, município, zona e seção; cada campo vazio amplia o escopo. Por exemplo, apenas UF traz seções de todos os municípios e zonas daquela UF. Todos vazios consultam o inventário nacional. O lote coleta até 10 seções por padrão (ajustável até 100); se houver mais correspondências, o resumo avisa. O workflow publica catálogos originais, inventário, aquisições e relatórios juntos num artefato por 90 dias. Ele não é disparado automaticamente.
+Na aba **Actions**, escolha **Coleta por abrangência** e o turno (`1`, `2` ou `ambos`). O catálogo e os dados são descobertos/coletados com os IDs correspondentes, e cada turno fica em diretórios e relatórios próprios. Informe qualquer combinação de UF, município, zona e seção; cada campo vazio amplia o escopo. Por exemplo, apenas UF traz seções de todos os municípios e zonas daquela UF. Todos vazios consultam o inventário nacional. O lote coleta até 10 seções por padrão (ajustável até 100); se houver mais correspondências, o resumo avisa. O workflow publica catálogos originais, inventário, aquisições e relatórios juntos num artefato por 90 dias. Ele não é disparado automaticamente.
+
+O manifesto pode listar `vota.vsc` como `tp=vota`. É um pacote de assinaturas de software/hardware e declarações de hashes de arquivos assinados da urna, incluindo BU, RDV e log; não é um arquivo de votos. A aplicação preserva os bytes e os hashes locais, mas ainda não interpreta nem verifica as assinaturas nele contidas. O relatório marca essa etapa como não realizada. Os agregados de log agora são particionados pela data registrada em cada evento; no material observado, o log do segundo turno contém datas dos dois turnos e pode ser comparado com cada BU pela data de emissão.
 
 O workflow **Piloto de coleta de seção** continua disponível para repetir uma única seção.
 
