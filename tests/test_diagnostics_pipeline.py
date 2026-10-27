@@ -12,7 +12,8 @@ from unittest.mock import patch
 import asn1tools
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from analyze_section import analyze_collection, log_bu_reconciliation_diagnostics, parse_cuts, process_log_file
+from analyze_section import (analyze_collection, closure_sequence_matches_observed_order,
+    log_bu_reconciliation_diagnostics, parse_cuts, process_log_file)
 from analyze_sections import analyze_sections
 from collect_sections import collect_sections
 from consolidate_diagnostics import consolidate_paths
@@ -74,6 +75,21 @@ class DiagnosticPipelineTests(unittest.TestCase):
             self.assertEqual(result["activity_after_clock_cuts_by_date"]["2026-10-04"]["habilitacao_a_partir_de_17h00"], 1)
             self.assertEqual(result["events"][0]["at_or_after_clock_cuts"], ["17:00"])
 
+    def test_closure_order_matches_observed_log_sequence_and_allows_repeated_commands(self):
+        self.assertTrue(closure_sequence_matches_observed_order([
+            "comando_encerramento", "conclusao_encerramento", "inicio_encerramento"
+        ]))
+        self.assertTrue(closure_sequence_matches_observed_order([
+            "comando_encerramento", "comando_encerramento",
+            "conclusao_encerramento", "inicio_encerramento"
+        ]))
+        self.assertFalse(closure_sequence_matches_observed_order([
+            "comando_encerramento", "inicio_encerramento", "conclusao_encerramento"
+        ]))
+        self.assertFalse(closure_sequence_matches_observed_order([
+            "conclusao_encerramento", "inicio_encerramento"
+        ]))
+
     def test_collection_and_extraction_are_section_turn_file_structured(self):
         schema = asn1tools.compile_files(str(ROOT / "schemas/bu.asn1"), codec="ber")
         identity = {"municipioZona": {"municipio": 56251, "zona": 54}, "local": 1, "secao": 509}
@@ -118,7 +134,7 @@ class DiagnosticPipelineTests(unittest.TestCase):
             raw_bu = acquisition_path.parent / bu_item["relative_path"]
             self.assertEqual(raw_bu.parent.name, "bu")
             self.assertIn("turno-1", str(raw_bu))
-            extract_collection(acquisition_path, parse_cuts(["17:00"]), ROOT / "schemas/bu.asn1", ROOT / "schemas/rdv.asn1")
+            extract_collection(acquisition_path, ROOT / "schemas/bu.asn1", ROOT / "schemas/rdv.asn1")
             extracted = json.loads(raw_bu.with_name(raw_bu.name + ".json").read_text(encoding="utf-8"))
             self.assertEqual(extracted["turno"], 1)
             self.assertEqual(extracted["pleito_id"], 3220)
@@ -132,7 +148,7 @@ class DiagnosticPipelineTests(unittest.TestCase):
             log_extraction = json.loads(raw_log.with_name(raw_log.name + ".json").read_text(encoding="utf-8"))
             self.assertEqual(len(log_extraction["events"]), 1)
             self.assertEqual(log_extraction["events"][0]["event_timestamp_raw"], "26/10/2026 17:01:00")
-            self.assertEqual(log_extraction["events"][0]["at_or_after_clock_cuts"], ["17:00"])
+            self.assertNotIn("at_or_after_clock_cuts", log_extraction["events"][0])
             self.assertFalse(any("reports" in path.parts for path in Path(temp).rglob("*")))
             self.assertFalse(any(path.name == "diagnosticos-consolidados.json" for path in Path(temp).rglob("*.json")))
 
@@ -263,6 +279,29 @@ class DiagnosticPipelineTests(unittest.TestCase):
         self.assertEqual([section["status"] for section in report["sections"]], ["failed", "collected"])
         self.assertEqual(report["section_count"], 2)
         self.assertEqual(report["diagnostics"][0]["code"], "BATCH_SECTION_COLLECTION_FAILED")
+
+    def test_batch_collection_slices_inventory_by_offset_and_limit(self):
+        calls = []
+
+        class Completed:
+            returncode = 0
+            stderr = ""
+
+            def __init__(self, section):
+                self.stdout = json.dumps({"section_key": section, "diagnostics": [],
+                    "file_states": [], "acquisition": "acquisition.json"})
+
+        def runner(command, **_kwargs):
+            calls.append(command)
+            return Completed("synthetic-section")
+
+        sections = [{"uf": "es", "municipio": str(number), "zona": "1", "secao": str(number)}
+                    for number in range(1, 6)]
+        result = collect_sections(sections, Path("unused-output"), runner, offset=2, limit=2)
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual([command[command.index("--secao") + 1] for command in calls], ["3", "4"])
+        self.assertEqual(result["section_count"], 2)
 
     def test_batch_analysis_continues_after_bad_section_manifest(self):
         with tempfile.TemporaryDirectory() as temp:

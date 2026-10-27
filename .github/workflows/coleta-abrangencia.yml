@@ -32,45 +32,51 @@ on:
         type: string
         required: false
         default: ''
+      offset:
+        description: Posição inicial no inventário filtrado
+        type: number
+        required: true
+        default: 0
       max_secoes:
-        description: Máximo de seções a coletar nesta execução (1 a 100)
-        type: string
+        description: Máximo por turno nesta execução (1 a 5000; processado em faixas de até 100)
+        type: number
         required: true
-        default: '10'
-      cortes_horarios:
-        description: Cortes HH:MM separados por vírgula (escala bruta do log)
-        type: string
-        required: true
-        default: '17:00,17:15,17:30,17:45,18:00,18:30,19:00'
+        default: 100
 
 permissions:
   contents: read
 
 concurrency:
-  group: coleta-abrangencia-${{ inputs.turno }}-${{ inputs.uf || 'br' }}-${{ inputs.municipio || 'todos' }}-${{ inputs.zona || 'todas' }}-${{ inputs.secao || 'todas' }}
+  group: coleta-abrangencia-${{ inputs.turno }}-${{ inputs.uf || 'br' }}-${{ inputs.municipio || 'todos' }}-${{ inputs.zona || 'todas' }}-${{ inputs.secao || 'todas' }}-${{ inputs.offset }}
   cancel-in-progress: false
 
 jobs:
-  descobrir-e-coletar:
+  descobrir-inventario:
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    outputs:
+      batch_matrix: ${{ steps.batches.outputs.matrix }}
+      batch_count: ${{ steps.batches.outputs.count }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Validar limite da execução
+      - name: Validar faixa solicitada
         env:
           LIMIT: ${{ inputs.max_secoes }}
+          OFFSET: ${{ inputs.offset }}
         run: |
           python - <<'PY'
           import os
           limit=int(os.environ['LIMIT'])
-          if not 1 <= limit <= 100: raise SystemExit('max_secoes precisa estar entre 1 e 100')
+          offset=int(os.environ['OFFSET'])
+          if not 1 <= limit <= 5000: raise SystemExit('max_secoes precisa estar entre 1 e 5000 por turno')
+          if offset < 0: raise SystemExit('offset não pode ser negativo')
           PY
       - name: Instalar dependências
         run: python -m pip install -r requirements.txt
-      - name: Descobrir seções e aplicar filtros territoriais por turno
+      - name: Descobrir seleções do catálogo por turno
         env:
           TURNO: ${{ inputs.turno }}
           UF: ${{ inputs.uf }}
@@ -78,46 +84,126 @@ jobs:
           ZONA: ${{ inputs.zona }}
           SECAO: ${{ inputs.secao }}
           LIMIT: ${{ inputs.max_secoes }}
+          OFFSET: ${{ inputs.offset }}
         run: |
           if [[ "$TURNO" == "ambos" ]]; then TURNOS=(1 2); else TURNOS=("$TURNO"); fi
           for TURNO_ATUAL in "${TURNOS[@]}"; do
             if [[ "$TURNO_ATUAL" == 1 ]]; then CONFIG_ID=3220; else CONFIG_ID=3221; fi
             DEST="inventario/turno${TURNO_ATUAL}"
-            ARGS=(--config-id "$CONFIG_ID" --offset 0 --limit "$LIMIT" --output "$DEST")
+            ARGS=(--config-id "$CONFIG_ID" --offset "$OFFSET" --limit "$LIMIT" --output "$DEST")
             if [[ -n "$UF" ]]; then ARGS+=(--uf "$UF"); fi
             if [[ -n "$MUNICIPIO" ]]; then ARGS+=(--municipio "$MUNICIPIO"); fi
             if [[ -n "$ZONA" ]]; then ARGS+=(--zona "$ZONA"); fi
             if [[ -n "$SECAO" ]]; then ARGS+=(--secao "$SECAO"); fi
             python tools/discover_sections.py "${ARGS[@]}" > /dev/null
           done
-      - name: Coletar arquivos oficiais separados por turno
+      - name: Dividir a seleção em faixas de até 100 seções
+        id: batches
         env:
           TURNO: ${{ inputs.turno }}
+          BASE_OFFSET: ${{ inputs.offset }}
         run: |
-          if [[ "$TURNO" == "ambos" ]]; then TURNOS=(1 2); else TURNOS=("$TURNO"); fi
-          mkdir -p dados
-          for TURNO_ATUAL in "${TURNOS[@]}"; do
-            if [[ "$TURNO_ATUAL" == 1 ]]; then DATA_ID=3220; else DATA_ID=3221; fi
-            python tools/collect_sections.py \
-              --sections "inventario/turno${TURNO_ATUAL}/section-inventory.json" \
-              --data-id "$DATA_ID" --output dados
-          done
-      - name: Extrair dados estruturados junto aos arquivos de origem
-        env:
-          CORTES: ${{ inputs.cortes_horarios }}
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          from pathlib import Path
+          turns = ("1", "2") if os.environ["TURNO"] == "ambos" else (os.environ["TURNO"],)
+          base_offset = int(os.environ["BASE_OFFSET"])
+          batches = []
+          for turn in turns:
+              inventory = json.loads(Path(f"inventario/turno{turn}/section-inventory.json").read_text())
+              selected = len(inventory["sections"])
+              for local_offset in range(0, selected, 100):
+                  count = min(100, selected - local_offset)
+                  range_start = base_offset + local_offset
+                  batches.append({"turno": turn, "data_id": "3220" if turn == "1" else "3221",
+                      "offset": local_offset, "range_start": range_start, "range_end": range_start + count,
+                      "limit": count})
+          if not batches:
+              raise SystemExit("Nenhuma seção foi selecionada pelo inventário e filtros informados.")
+          print("matrix=" + json.dumps({"include": batches}, separators=(",", ":")))
+          print("count=" + str(len(batches)))
+          PY
+      - name: Preparar inventário para os jobs de faixa
+        run: |
+          mkdir -p artifact-content/inventario
+          cp -a inventario/. artifact-content/inventario/
+      - name: Publicar inventário selecionado
+        uses: actions/upload-artifact@v4
+        with:
+          name: inventario-selecionado
+          path: artifact-content/
+          if-no-files-found: error
+          retention-days: 90
+
+  coletar-faixas:
+    needs: descobrir-inventario
+    if: ${{ needs.descobrir-inventario.outputs.batch_count != '0' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.descobrir-inventario.outputs.batch_matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Instalar dependências
+        run: python -m pip install -r requirements.txt
+      - name: Baixar inventário desta execução
+        uses: actions/download-artifact@v4
+        with:
+          name: inventario-selecionado
+          path: .
+      - name: Coletar esta faixa
+        run: |
+          python tools/collect_sections.py \
+            --sections "inventario/turno${{ matrix.turno }}/section-inventory.json" \
+            --data-id "${{ matrix.data_id }}" --offset "${{ matrix.offset }}" \
+            --limit "${{ matrix.limit }}" --output dados
+      - name: Extrair arquivos sem agregação por faixa horária
         run: |
           ARGS=()
           while IFS= read -r acquisition; do ARGS+=(--acquisition "$acquisition"); done < <(find dados -name acquisition.json -type f | sort)
-          if ((${#ARGS[@]})); then
-            CUT_ARGS=()
-            IFS=',' read -ra CUTS <<< "$CORTES"
-            for cut in "${CUTS[@]}"; do CUT_ARGS+=(--cut "$cut"); done
-            python tools/extract_section_data.py "${ARGS[@]}" "${CUT_ARGS[@]}"
-          fi
-      - name: Publicar inventário e dados organizados por seção/turno
+          if ((${#ARGS[@]})); then python tools/extract_section_data.py "${ARGS[@]}"; fi
+      - name: Preparar artefato da faixa
+        run: |
+          mkdir -p artifact-content/dados
+          cp -a dados/. artifact-content/dados/
+      - name: Publicar faixa
         uses: actions/upload-artifact@v4
         with:
-          name: dados-turno-${{ inputs.turno }}-${{ inputs.uf || 'br' }}-${{ inputs.municipio || 'todos' }}-${{ inputs.zona || 'todas' }}-${{ inputs.secao || 'todas' }}
+          name: dados-lote-turno${{ matrix.turno }}-${{ matrix.range_start }}-${{ matrix.range_end }}
+          path: artifact-content/
+          if-no-files-found: error
+          retention-days: 90
+
+  montar-arquivo-final:
+    needs: [descobrir-inventario, coletar-faixas]
+    if: ${{ always() && needs.descobrir-inventario.result == 'success' && needs.coletar-faixas.result != 'cancelled' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Baixar inventário selecionado
+        uses: actions/download-artifact@v4
+        with:
+          name: inventario-selecionado
+          path: .
+      - name: Reunir arquivos das faixas concluídas
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dados-lote-*
+          path: lotes
+          merge-multiple: true
+      - name: Montar árvore final
+        run: |
+          mkdir -p dados
+          if [[ -d lotes/dados ]]; then cp -a lotes/dados/. dados/; fi
+      - name: Publicar coleta organizada
+        uses: actions/upload-artifact@v4
+        with:
+          name: dados-turno-${{ inputs.turno }}-${{ inputs.uf || 'br' }}-${{ inputs.municipio || 'todos' }}-${{ inputs.zona || 'todas' }}-${{ inputs.secao || 'todas' }}-offset-${{ inputs.offset }}-max-${{ inputs.max_secoes }}
           path: |
             inventario/
             dados/

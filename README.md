@@ -13,13 +13,13 @@ python tools/discover_sections.py --uf es --municipio 56251 --zona 0054 --secao 
 # Todas as seções da zona 0054 de Cariacica
 python tools/discover_sections.py --uf es --municipio 56251 --zona 0054 --limit 1000
 
-# Primeiras 100 seções do inventário nacional; aumente o offset para outra página
-python tools/discover_sections.py --limit 100 --offset 0
+# Descubra até 5.000 seções; depois colete uma faixa de até 100
+python tools.discover_sections.py --limit 5000 --offset 0
 python tools/collect_sections.py --sections inventario/section-inventory.json --data-id 3221 \
-  --output dados
+  --offset 0 --limit 100 --output dados
 ```
 
-`--config-id` escolhe o catálogo de seções e `--data-id` escolhe a base dos manifestos por seção. Para as Eleições 2026 observadas aqui, `3220` corresponde ao primeiro turno e `3221` ao segundo; os identificadores e datas da fonte são preservados nos artefatos. O limite do CLI é 5.000 seções; a execução pelo Actions limita cada lote a 100. Para seções específicas, prefira os filtros geográficos, que são mais estáveis do que paginação enquanto o catálogo oficial muda.
+`--config-id` escolhe o catálogo de seções e `--data-id` escolhe a base dos manifestos por seção. Para as Eleições 2026 observadas aqui, `3220` corresponde ao primeiro turno e `3221` ao segundo; os identificadores e datas da fonte são preservados nos artefatos. A descoberta seleciona até 5.000 seções por turno; a coleta processa faixas de até 100. Para seções específicas, prefira os filtros geográficos, que são mais estáveis do que paginação enquanto o catálogo oficial muda.
 
 ## Rodar o piloto de Cariacica
 
@@ -30,13 +30,13 @@ ACQ=$(find dados/es/56251/0054/0509 -name acquisition.json -type f | sort | tail
 python3 tools/extract_section_data.py --acquisition "$ACQ"
 ```
 
-Os originais e seus JSONs estruturados ficam juntos sob `dados/`, ignorado pelo Git. O JSON do log preserva os timestamps e eventos individuais sem mensagens brutas nem identificadores. Cortes `--cut HH:MM` podem ser repetidos; os horários permanecem na escala bruta até que o fuso seja validado.
+Os originais e seus JSONs estruturados ficam juntos sob `dados/`, ignorado pelo Git. O JSON do log preserva os timestamps e eventos individuais sem mensagens brutas nem identificadores. A extração não aplica faixas horárias nem consolida eventos em contagens.
 
 ## GitHub Actions
 
-Na aba **Actions**, escolha **Coleta por abrangência** e o turno (`1`, `2` ou `ambos`). O catálogo e os dados são descobertos/coletados com os IDs correspondentes. Informe qualquer combinação de UF, município, zona e seção; cada campo vazio amplia o escopo. Por exemplo, apenas UF traz seções de todos os municípios e zonas daquela UF. Todos vazios consultam o inventário nacional. O lote coleta até 10 seções por padrão (ajustável até 100). O workflow publica inventário e dados originais/extraídos juntos num artefato por 90 dias; não publica uma árvore paralela de relatórios. Ele não é disparado automaticamente.
+Na aba **Actions**, escolha **Coleta por abrangência** e o turno (`1`, `2` ou `ambos`). Informe qualquer combinação de UF, município, zona e seção; cada campo vazio amplia o escopo. `offset` e `max_secoes` definem a página selecionada, com até 5.000 seções por turno; o workflow divide a página em faixas de até 100 e executa um job independente e sequencial para cada faixa. Cada job tem timeout próprio de 180 minutos, e os arquivos das faixas concluídas são reunidos em um artefato final por 90 dias. O workflow é manual.
 
-Cada seção fica sob `dados/<uf>/<municipio>/<zona>/<secao>/`. A coleta organiza BU e RDV em `turno-1/` ou `turno-2/`, usando o `idPleito` extraído do BU; o log fica na pasta `logs/` da seção e os eventos têm um JSON extraído ao lado do original. Os JSONs de BU e RDV também ficam ao lado dos arquivos originais. `acquisition.json` preserva URL, hashes, estado e proveniência da aquisição. Um `vota.vsc` listado no manifesto é registrado como não aplicável e não é baixado. O JSON do log preserva os eventos um a um, com timestamp, data, hora e flags por evento para os cortes configurados; não gera agregação ou relatório consolidado.
+Cada seção fica sob `dados/<uf>/<municipio>/<zona>/<secao>/`. A coleta organiza BU e RDV em `turno-1/` ou `turno-2/`, usando o `idPleito` extraído do BU; o log fica na pasta `logs/` da seção e os eventos têm um JSON extraído ao lado do original. Os JSONs de BU e RDV também ficam ao lado dos arquivos originais. `acquisition.json` preserva URL, hashes, estado e proveniência da aquisição. Um `vota.vsc` listado no manifesto é registrado como não aplicável e não é baixado. O JSON do log preserva cada evento e seu timestamp, sem faixas horárias, contagens consolidadas ou relatório paralelo.
 
 ```text
 dados/es/56251/0054/0509/

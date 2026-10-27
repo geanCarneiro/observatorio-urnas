@@ -11,12 +11,19 @@ from pathlib import Path
 
 from diagnostics import diagnostic, summarize_diagnostics
 
+MAX_BATCH_SIZE = 100
 
-def collect_sections(sections: list[dict], output_root: Path, runner=subprocess.run, data_id: str = "3221") -> dict:
+def collect_sections(sections: list[dict], output_root: Path, runner=subprocess.run, data_id: str = "3221",
+                    offset: int = 0, limit: int = MAX_BATCH_SIZE) -> dict:
     diagnostics = []
     results = []
     script = Path(__file__).with_name("collect_section.py")
-    for index, section in enumerate(sections):
+    if offset < 0:
+        raise ValueError("offset must be zero or greater")
+    if not 1 <= limit <= MAX_BATCH_SIZE:
+        raise ValueError(f"limit must be between 1 and {MAX_BATCH_SIZE}")
+    selected = sections[offset:offset + limit]
+    for index, section in enumerate(selected, start=offset):
         diagnostics_before = len(diagnostics)
         key = "/".join((str(section.get("uf", "")).lower(), str(section.get("municipio", "")),
                         str(section.get("zona", "")), str(section.get("secao", ""))))
@@ -69,7 +76,14 @@ def main() -> int:
                         help="JSON array or section-inventory report with a sections[] array")
     parser.add_argument("--data-id", default="3221", help="TSE arquivo-urna dataset ID (default: 3221)")
     parser.add_argument("--output", type=Path, default=Path("dados-brutos"))
+    parser.add_argument("--offset", type=int, default=0, help="start index in the selected inventory")
+    parser.add_argument("--limit", type=int, default=MAX_BATCH_SIZE,
+                        help=f"maximum sections in this batch (1..{MAX_BATCH_SIZE}; default: {MAX_BATCH_SIZE})")
     args = parser.parse_args()
+    if args.offset < 0:
+        parser.error("offset must be zero or greater")
+    if not 1 <= args.limit <= MAX_BATCH_SIZE:
+        parser.error(f"limit must be between 1 and {MAX_BATCH_SIZE}")
     try:
         sections = json.loads(args.sections.read_text(encoding="utf-8"))
         if isinstance(sections, dict):
@@ -86,7 +100,8 @@ def main() -> int:
         result = {"report_type": "batch_collection", "section_count": 0, "sections": [],
                   "diagnostics": diagnostics, "diagnostic_summary": summarize_diagnostics(diagnostics)}
     else:
-        result = collect_sections(sections, args.output, data_id=args.data_id)
+        result = collect_sections(sections, args.output, data_id=args.data_id,
+                                  offset=args.offset, limit=args.limit)
     return 0
 
 

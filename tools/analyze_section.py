@@ -48,6 +48,19 @@ def parse_cuts(values: list[str]) -> list[str]:
     return sorted(set(values))
 
 
+def closure_sequence_matches_observed_order(event_types: list[str]) -> bool:
+    """Match the closure sequence observed in official logs.
+
+    The operator may select closure more than once. The log then records one
+    or more commands, the confirmation, and finally "Inicio do Encerramento".
+    """
+    command = "comando_encerramento"
+    expected_suffix = ["conclusao_encerramento", "inicio_encerramento"]
+    return (len(event_types) >= 3
+            and event_types[-2:] == expected_suffix
+            and all(event_type == command for event_type in event_types[:-2]))
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -208,7 +221,6 @@ def analyze(log_path: Path, bu_path: Path, collection_path: Path, cuts: list[str
         day = [e for e in events if e["event_timestamp_raw"].startswith(date_prefix)]
         closure_stream = [e for e in day if e["event_type"] in {"comando_encerramento", "inicio_encerramento", "conclusao_encerramento"}]
         closure_types = [e["event_type"] for e in closure_stream]
-        semantic_order = ["comando_encerramento", "inicio_encerramento", "conclusao_encerramento"]
         def last_of(kind: str):
             matches = [e["event_timestamp_raw"] for e in day if e["event_type"] == kind]
             return max(matches) if matches else None
@@ -221,7 +233,7 @@ def analyze(log_path: Path, bu_path: Path, collection_path: Path, cuts: list[str
             "last_conclusao_encerramento_raw": last_of("conclusao_encerramento"),
             "closure_events_in_log_order": [{"line_number": e["line_number"], "event_type": e["event_type"], "event_timestamp_raw": e["event_timestamp_raw"]} for e in closure_stream],
             "closure_clock_order": "non_monotonic" if any(a["event_timestamp_raw"] > b["event_timestamp_raw"] for a, b in zip(closure_stream, closure_stream[1:])) else "monotonic",
-            "closure_semantic_order": "matches_expected" if closure_types == semantic_order else "differs_from_expected",
+            "closure_semantic_order": "matches_expected" if closure_sequence_matches_observed_order(closure_types) else "differs_from_expected",
             "activity_after_clock_cuts": {
                 f"{kind}_a_partir_de_{cut.replace(':', 'h')}": after_cuts[date].get(f"{kind}_a_partir_de_{cut.replace(':', 'h')}", 0)
                 for kind in ("habilitacao", "voto_computado", "voto_confirmado_governador", "voto_confirmado_presidente")

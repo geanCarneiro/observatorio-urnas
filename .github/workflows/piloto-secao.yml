@@ -23,12 +23,6 @@ on:
         type: string
         required: true
         default: '0509'
-      cortes_horarios:
-        description: Cortes HH:MM separados por vírgula (escala bruta do log)
-        type: string
-        required: true
-        default: '17:00,17:15,17:30,17:45,18:00,18:30,19:00'
-
 permissions:
   contents: read
 
@@ -37,7 +31,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  coletar-e-resumir:
+  coletar-e-extrair:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -65,14 +59,9 @@ jobs:
           print('run_dir='+str(pathlib.Path(x['acquisition']).parent))
           PY
       - name: Extrair campos estruturados junto aos arquivos de origem
-        env:
-          CORTES: ${{ inputs.cortes_horarios }}
         run: |
-          ARGS=()
-          IFS=',' read -ra CUTS <<< "$CORTES"
-          for cut in "${CUTS[@]}"; do ARGS+=(--cut "$cut"); done
           python tools/extract_section_data.py \
-            --acquisition "${{ steps.collect.outputs.run_dir }}/acquisition.json" "${ARGS[@]}"
+            --acquisition "${{ steps.collect.outputs.run_dir }}/acquisition.json"
       - name: Publicar dados organizados por seção e turno
         uses: actions/upload-artifact@v4
         with:

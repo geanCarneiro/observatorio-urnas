@@ -9,7 +9,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from analyze_section import DEFAULT_CUTS, analyze_collection, parse_cuts
+from analyze_section import analyze_collection
 from election_turns import turn_for_pleito
 
 
@@ -37,10 +37,9 @@ def _file_diagnostics(diagnostics: list[dict], kind: str, name: str) -> list[dic
     return [item for item in diagnostics if item.get("file_type") == kind and item.get("file_name") == name]
 
 
-def extract_collection(acquisition_path: Path, cuts: list[str], bu_schema: Path,
-                       rdv_schema: Path) -> None:
+def extract_collection(acquisition_path: Path, bu_schema: Path, rdv_schema: Path) -> None:
     acquisition = json.loads(acquisition_path.read_text(encoding="utf-8"))
-    extraction = analyze_collection(acquisition_path, cuts, bu_schema, rdv_schema)
+    extraction = analyze_collection(acquisition_path, [], bu_schema, rdv_schema)
     acquisition_source = {
         "data_id": acquisition.get("data_id"),
         "pleito_id": acquisition.get("pleito_id"),
@@ -84,7 +83,9 @@ def extract_collection(acquisition_path: Path, cuts: list[str], bu_schema: Path,
                     "acquisition": acquisition_source,
                     "section_key": acquisition.get("section_key"),
                     "status": result.get("status"),
-                    "events": result.get("events", []),
+                    "events": [{key: value for key, value in event.items()
+                                if key != "at_or_after_clock_cuts"}
+                               for event in result.get("events", [])],
                     "diagnostics": result.get("diagnostics") or _file_diagnostics(
                         extraction.get("diagnostics", []), kind, name),
                     "record_policy": "Each allowlisted source event is a separate object in events[]; raw message fields are omitted.",
@@ -102,13 +103,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--acquisition", type=Path, action="append", required=True,
                         help="acquisition.json; repeat for multiple sections")
-    parser.add_argument("--cut", action="append", dest="cuts")
     parser.add_argument("--schema", type=Path, default=Path("schemas/bu.asn1"))
     parser.add_argument("--rdv-schema", type=Path, default=Path("schemas/rdv.asn1"))
     args = parser.parse_args()
-    cuts = parse_cuts(args.cuts or list(DEFAULT_CUTS))
     for acquisition in args.acquisition:
-        extract_collection(acquisition, cuts, args.schema, args.rdv_schema)
+        extract_collection(acquisition, args.schema, args.rdv_schema)
     return 0
 
 
