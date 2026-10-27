@@ -59,69 +59,24 @@ jobs:
             --uf "$UF" --municipio "$MUNICIPIO" --zona "$ZONA" --secao "$SECAO" \
             --output dados > "$RUNNER_TEMP/coleta.json"
           python - <<'PY' >> "$GITHUB_OUTPUT"
-          import glob, json, os
+          import json, os, pathlib
           x=json.load(open(os.path.join(os.environ['RUNNER_TEMP'],'coleta.json')))
           print('section_key='+x['section_key'])
-          print('run_dir=dados/'+x['section_key']+'/runs/'+x['acquisition_id'])
+          print('run_dir='+str(pathlib.Path(x['acquisition']).parent))
           PY
-      - name: Preparar originais RDV e proveniência
-        run: |
-          python - "${{ steps.collect.outputs.run_dir }}" <<'PY'
-          import hashlib, json, pathlib, shutil, sys
-          root=pathlib.Path(sys.argv[1])
-          output=pathlib.Path('rdv-originais')
-          output.mkdir(parents=True, exist_ok=True)
-          acquisition=json.load(open(root/'collection.json', encoding='utf-8'))
-          rdvs=[item for item in acquisition['files'] if item['type']=='rdv']
-          for item in rdvs:
-              source=root/item['relative_path']
-              target=output/item['relative_path']
-              target.parent.mkdir(parents=True, exist_ok=True)
-              shutil.copyfile(source, target)
-              digest=hashlib.sha256(target.read_bytes()).hexdigest()
-              if digest != item['sha256'] or target.stat().st_size != item['size_bytes']:
-                  raise SystemExit(f'Falha ao verificar cópia RDV: {item["name"]}')
-          for state in acquisition.get('file_states', []):
-              if state.get('status') != 'partial' or not state.get('path'): continue
-              source=pathlib.Path(state['path'])
-              if not source.is_absolute(): source=pathlib.Path.cwd()/source
-              if not source.exists(): continue
-              target=output/'partial'/str(state.get('type','unknown'))/(state.get('name') or source.name)
-              target.parent.mkdir(parents=True, exist_ok=True)
-              shutil.copyfile(source, target)
-              expected=state.get('sha256')
-              digest=hashlib.sha256(target.read_bytes()).hexdigest()
-              if expected and digest != expected: raise SystemExit(f'Falha ao verificar arquivo parcial: {target.name}')
-          if (root/'manifest.aux.jws').exists(): shutil.copyfile(root/'manifest.aux.jws', output/'manifest.aux.jws')
-          shutil.copyfile(root/'collection.json', output/'collection.json')
-          print(f'{len(rdvs)} RDV original(is) preparado(s); acquisition diagnostics retained')
-          PY
-      - name: Preservar RDV original e proveniência
-        uses: actions/upload-artifact@v4
-        with:
-          name: rdv-originais-${{ inputs.uf }}-${{ inputs.municipio }}-${{ inputs.zona }}-${{ inputs.secao }}
-          path: rdv-originais/
-          if-no-files-found: error
-          retention-days: 90
-      - name: Gerar análise e diagnósticos detalhados
+      - name: Extrair campos estruturados junto aos arquivos de origem
         env:
           CORTES: ${{ inputs.cortes_horarios }}
         run: |
           ARGS=()
           IFS=',' read -ra CUTS <<< "$CORTES"
           for cut in "${CUTS[@]}"; do ARGS+=(--cut "$cut"); done
-          python tools/analyze_section.py \
-            --collection "${{ steps.collect.outputs.run_dir }}/collection.json" \
-            --output reports/piloto-secao-v4.json "${ARGS[@]}"
-          python tools/consolidate_diagnostics.py \
-            --report reports/piloto-secao-v4.json \
-            --output reports/diagnosticos-consolidados.json
-      - name: Publicar resumo com registros RDV
+          python tools/extract_section_data.py \
+            --acquisition "${{ steps.collect.outputs.run_dir }}/acquisition.json" "${ARGS[@]}"
+      - name: Publicar dados organizados por seção e turno
         uses: actions/upload-artifact@v4
         with:
-          name: resumo-piloto-${{ inputs.uf }}-${{ inputs.municipio }}-${{ inputs.zona }}-${{ inputs.secao }}
-          path: |
-            reports/piloto-secao-v4.json
-            reports/diagnosticos-consolidados.json
+          name: dados-piloto-${{ inputs.uf }}-${{ inputs.municipio }}-${{ inputs.zona }}-${{ inputs.secao }}
+          path: dados/${{ steps.collect.outputs.section_key }}/
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90

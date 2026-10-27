@@ -18,6 +18,7 @@ from collect_sections import collect_sections
 from consolidate_diagnostics import consolidate_paths
 from collect_section import DownloadIncompleteError, canonical_manifest_file_type, fetch
 import collect_section
+from extract_section_data import extract_collection
 from diagnostics import summarize_diagnostics, verify_jws_signature
 
 
@@ -46,13 +47,15 @@ class DiagnosticPipelineTests(unittest.TestCase):
              patch("sys.stdout", new_callable=io.StringIO):
             self.assertEqual(collect_section.main(), 0)
             self.assertEqual(fetch_mock.call_count, 1)  # only aux.jws was fetched
-            collection_path = next(Path(temp).rglob("collection.json"))
+            collection_path = next(Path(temp).rglob("acquisition.json"))
             collection = json.loads(collection_path.read_text(encoding="utf-8"))
             self.assertEqual(collection["files"], [])
             vsc_state = next(state for state in collection["file_states"] if state["type"] == "vota.vsc")
             self.assertEqual(vsc_state["status"], "not_applicable")
             self.assertEqual(vsc_state["manifest_hash"], "vsc-manifest-hash")
             self.assertFalse(any(item["code"] == "COLLECT_FILE_TYPE_UNSUPPORTED" for item in collection["diagnostics"]))
+            self.assertEqual(collection["turn_directory"], "turno-desconhecido")
+            self.assertNotIn("diagnostic_summary", collection)
 
     def test_log_activity_is_partitioned_by_event_date(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -69,6 +72,67 @@ class DiagnosticPipelineTests(unittest.TestCase):
             self.assertEqual(result["event_counts_by_date"]["2026-10-25"]["habilitacao"], 1)
             self.assertEqual(result["events_by_date"]["2026-10-25"]["event_counts"]["voto_computado"], 1)
             self.assertEqual(result["activity_after_clock_cuts_by_date"]["2026-10-04"]["habilitacao_a_partir_de_17h00"], 1)
+            self.assertEqual(result["events"][0]["at_or_after_clock_cuts"], ["17:00"])
+
+    def test_collection_and_extraction_are_section_turn_file_structured(self):
+        schema = asn1tools.compile_files(str(ROOT / "schemas/bu.asn1"), codec="ber")
+        identity = {"municipioZona": {"municipio": 56251, "zona": 54}, "local": 1, "secao": 509}
+        urna = {"tipoUrna": "secao", "versaoVotacao": "synthetic", "correspondenciaResultado": {
+            "identificacao": ("identificacaoSecaoEleitoral", identity), "carga": {"numeroInternoUrna": 1,
+                "numeroSerieFC": b"1234", "identificadorGeradorMidia": {"nome": "fixture", "serialCertificadoTPM": "fixture", "serialInstalacao": "fixture"},
+                "dataHoraCarga": "20261001T120000", "codigoCarga": "fixture"}},
+            "tipoArquivo": "votacaoUE", "numeroSerieFV": b"5678"}
+        bu = {"cabecalho": {"dataGeracao": "20261026T120000", "idEleitoral": ("idPleito", 3220)},
+            "fase": "oficial", "urna": urna, "identificacaoSecao": identity, "dataHoraEmissao": "20261026T120000",
+            "dadosSecaoSA": ("dadosSecao", {"dataHoraAbertura": "20261026T090000", "dataHoraEncerramento": "20261026T170000"}),
+            "qtdEleitoresCompareceram": 0, "resultadosVotacaoPorEleicao": [], "historicoCodigosCarga": []}
+        content = schema.encode("EntidadeBoletimUrna", bu)
+        envelope = {"cabecalho": bu["cabecalho"], "fase": "oficial",
+            "identificacao": ("identificacaoSecaoEleitoral", identity), "tipoEnvelope": "envelopeBoletimUrna", "conteudo": content}
+        bu_raw = schema.encode("EntidadeEnvelopeGenerico", envelope)
+
+        def b64url(value):
+            return base64.urlsafe_b64encode(value).decode().rstrip("=")
+        log_buffer = io.BytesIO()
+        with zipfile.ZipFile(log_buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("logd.dat", "26/10/2026 17:01:00\tx\tx\tx\tEleitor foi habilitado\n")
+        log_raw = log_buffer.getvalue()
+        manifest_payload = {"hashes": [
+            {"hash": "bu-hash", "arq": [{"tp": "bu", "nm": "o03221es5625100540509-bu.dat"}]},
+            {"hash": "log-hash", "arq": [{"tp": "log", "nm": "o03221es5625100540509-log.jez"}]},
+        ]}
+        manifest = ".".join((b64url(b'{"alg":"none"}'), b64url(json.dumps(manifest_payload).encode()), "c2ln")).encode()
+        http = {"status": "200"}
+        with tempfile.TemporaryDirectory() as temp, patch("collect_section.sys.argv", [
+                "collect_section.py", "--uf", "es", "--municipio", "56251", "--zona", "0054",
+                "--secao", "0509", "--data-id", "3221", "--output", temp]), \
+             patch("collect_section.fetch", side_effect=[(manifest, http), (bu_raw, http), (log_raw, http)]), \
+             patch("sys.stdout", new_callable=io.StringIO):
+            self.assertEqual(collect_section.main(), 0)
+            acquisition_path = next(Path(temp).rglob("acquisition.json"))
+            acquisition = json.loads(acquisition_path.read_text(encoding="utf-8"))
+            self.assertEqual(acquisition["turno"], 1)  # determined from BU idPleito, despite requested data_id 3221
+            self.assertEqual(acquisition["pleito_id"], 3220)
+            self.assertIn("COLLECT_DATA_TURN_MISMATCH", {d["code"] for d in acquisition["diagnostics"]})
+            bu_item = next(item for item in acquisition["files"] if item["type"] == "bu")
+            raw_bu = acquisition_path.parent / bu_item["relative_path"]
+            self.assertEqual(raw_bu.parent.name, "bu")
+            self.assertIn("turno-1", str(raw_bu))
+            extract_collection(acquisition_path, parse_cuts(["17:00"]), ROOT / "schemas/bu.asn1", ROOT / "schemas/rdv.asn1")
+            extracted = json.loads(raw_bu.with_name(raw_bu.name + ".json").read_text(encoding="utf-8"))
+            self.assertEqual(extracted["turno"], 1)
+            self.assertEqual(extracted["pleito_id"], 3220)
+            self.assertEqual(extracted["data"]["election_date"], "2026-10-26")
+            log_item = next(item for item in acquisition["files"] if item["type"] == "log")
+            raw_log = acquisition_path.parent / log_item["relative_path"]
+            self.assertEqual(raw_log.name, "o03221es5625100540509-log.jez")
+            self.assertIn("/logs/runs/", str(raw_log))
+            log_extraction = json.loads(raw_log.with_name(raw_log.name + ".json").read_text(encoding="utf-8"))
+            self.assertEqual(len(log_extraction["events"]), 1)
+            self.assertEqual(log_extraction["events"][0]["event_timestamp_raw"], "26/10/2026 17:01:00")
+            self.assertEqual(log_extraction["events"][0]["at_or_after_clock_cuts"], ["17:00"])
+            self.assertFalse(any("reports" in path.parts for path in Path(temp).rglob("*")))
+            self.assertFalse(any(path.name == "diagnosticos-consolidados.json" for path in Path(temp).rglob("*.json")))
 
     def test_corrupt_truncated_and_unknown_files_do_not_stop_other_inputs(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -187,7 +251,7 @@ class DiagnosticPipelineTests(unittest.TestCase):
             if len(calls) == 1:
                 return Completed(1, stderr="synthetic section failure")
             return Completed(0, stdout=json.dumps({"section_key": "es/2/0001/0002", "diagnostics": [],
-                "file_states": [], "report": "collection.json"}))
+                "file_states": [], "acquisition": "acquisition.json"}))
 
         report = collect_sections([{"uf": "es", "municipio": "1", "zona": "1", "secao": "1"},
                                   {"uf": "es", "municipio": "2", "zona": "1", "secao": "2"}],

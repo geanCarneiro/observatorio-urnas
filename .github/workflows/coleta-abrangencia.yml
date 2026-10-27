@@ -88,55 +88,38 @@ jobs:
             if [[ -n "$MUNICIPIO" ]]; then ARGS+=(--municipio "$MUNICIPIO"); fi
             if [[ -n "$ZONA" ]]; then ARGS+=(--zona "$ZONA"); fi
             if [[ -n "$SECAO" ]]; then ARGS+=(--secao "$SECAO"); fi
-            python tools/discover_sections.py "${ARGS[@]}" > "$RUNNER_TEMP/inventory-summary-${TURNO_ATUAL}.json"
-            python - "$RUNNER_TEMP/inventory-summary-${TURNO_ATUAL}.json" "$TURNO_ATUAL" <<'PY' >> "$GITHUB_STEP_SUMMARY"
-          import json, sys
-          x=json.load(open(sys.argv[1]))
-          print(f"### Inventário do turno {sys.argv[2]}")
-          print(f"Status: **{x['status']}**; correspondências: **{x['matching_section_count']}**; nesta execução: **{x['selection']['selected_count']}**.")
-          print(f"Filtros: `{json.dumps(x['filters'], ensure_ascii=False)}`.")
-          if x['selection']['next_offset'] is not None:
-              print('O limite do lote foi atingido; refine o filtro geográfico para continuar por uma parte menor do inventário.')
-          PY
+            python tools/discover_sections.py "${ARGS[@]}" > /dev/null
           done
       - name: Coletar arquivos oficiais separados por turno
         env:
           TURNO: ${{ inputs.turno }}
         run: |
           if [[ "$TURNO" == "ambos" ]]; then TURNOS=(1 2); else TURNOS=("$TURNO"); fi
-          mkdir -p dados reports
+          mkdir -p dados
           for TURNO_ATUAL in "${TURNOS[@]}"; do
             if [[ "$TURNO_ATUAL" == 1 ]]; then DATA_ID=3220; else DATA_ID=3221; fi
             python tools/collect_sections.py \
               --sections "inventario/turno${TURNO_ATUAL}/section-inventory.json" \
-              --data-id "$DATA_ID" --output "dados/turno${TURNO_ATUAL}" \
-              --report "reports/coleta-turno${TURNO_ATUAL}.json"
+              --data-id "$DATA_ID" --output dados
           done
-      - name: Analisar cada seção e consolidar diagnósticos
+      - name: Extrair dados estruturados junto aos arquivos de origem
         env:
           CORTES: ${{ inputs.cortes_horarios }}
         run: |
           ARGS=()
-          while IFS= read -r collection; do ARGS+=(--collection "$collection"); done < <(find dados -name collection.json -type f | sort)
+          while IFS= read -r acquisition; do ARGS+=(--acquisition "$acquisition"); done < <(find dados -name acquisition.json -type f | sort)
           if ((${#ARGS[@]})); then
             CUT_ARGS=()
             IFS=',' read -ra CUTS <<< "$CORTES"
             for cut in "${CUTS[@]}"; do CUT_ARGS+=(--cut "$cut"); done
-            python tools/analyze_sections.py "${ARGS[@]}" --output-dir reports/analises "${CUT_ARGS[@]}"
-          else
-            python - <<'PY'
-          import json, pathlib
-          p=pathlib.Path('reports/analises'); p.mkdir(parents=True, exist_ok=True)
-          (p/'diagnosticos-consolidados.json').write_text(json.dumps({'report_type':'consolidated_diagnostics','section_count':0,'sections':[],'diagnostics':[],'diagnostics_summary':{'diagnostic_count':0}}, indent=2)+'\n')
-          PY
+            python tools/extract_section_data.py "${ARGS[@]}" "${CUT_ARGS[@]}"
           fi
-      - name: Publicar inventário, originais e relatórios
+      - name: Publicar inventário e dados organizados por seção/turno
         uses: actions/upload-artifact@v4
         with:
-          name: coleta-turno-${{ inputs.turno }}-${{ inputs.uf || 'br' }}-${{ inputs.municipio || 'todos' }}-${{ inputs.zona || 'todas' }}-${{ inputs.secao || 'todas' }}
+          name: dados-turno-${{ inputs.turno }}-${{ inputs.uf || 'br' }}-${{ inputs.municipio || 'todos' }}-${{ inputs.zona || 'todas' }}-${{ inputs.secao || 'todas' }}
           path: |
             inventario/
             dados/
-            reports/
           if-no-files-found: error
           retention-days: 90

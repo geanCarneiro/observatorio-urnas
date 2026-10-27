@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download one section's official TSE manifest, BU and logs without parsing them."""
+"""Download, preserve, and file one section's official TSE data by section and turn."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import json
 import http.client
 import os
 import re
+import shutil
 import sys
 import tempfile
 import time
@@ -19,7 +20,8 @@ from urllib.parse import quote
 from datetime import datetime, timezone
 from pathlib import Path
 
-from diagnostics import diagnostic, file_state, summarize_diagnostics, verify_jws_signature
+from diagnostics import diagnostic, file_state, verify_jws_signature
+from election_turns import folder_for_pleito
 
 BASE_TEMPLATE = "https://resultados.tse.jus.br/oficial/ele2026/arquivo-urna/{data_id}/dados"
 USER_AGENT = "observatorio-urnas/0.1 (section-level research collection)"
@@ -149,7 +151,8 @@ def main() -> int:
     stem = f"p00{args.data_id}-{args.uf}-m{municipality}-z{zone}-s{section}-aux.jws"
     manifest_url = f"{base}/{key}/{stem}"
     acquisition_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
-    root = args.output / key / "runs" / acquisition_id
+    section_root = args.output / key
+    root = section_root / ".staging" / acquisition_id
     run = {"section_key": key, "data_id": args.data_id,
            "turno": {"3220": "1", "3221": "2"}.get(args.data_id), "manifest_url": manifest_url,
            "acquired_at_utc": datetime.now(timezone.utc).isoformat(), "signature_status": "unverified",
@@ -282,6 +285,7 @@ def main() -> int:
                         context={"manifest_hash": content_hash}))
                     run["file_states"].append(file_state(file_type=str(file_type), name=str(name), section=key,
                         status="not_processed", reason="Unsupported manifest file type."))
+                    continue
                 if not isinstance(name, str) or Path(name).name != name or "/" in name or "\\" in name or name in {".", ".."}:
                     run["diagnostics"].append(diagnostic(code="COLLECT_MANIFEST_FILENAME_UNSAFE", stage="semantic_validation",
                         operation="validate_manifest_filename", error_type="semantic_validation", cause="manifest filename is unsafe",
@@ -290,7 +294,7 @@ def main() -> int:
                     run["file_states"].append(file_state(file_type=file_type, name=str(name), section=key, status="failed", reason="unsafe filename"))
                     continue
                 url = f"{base}/{key}/{content_hash}/{quote(name, safe='-_.')}"
-                relative = Path(content_hash) / name
+                relative = Path(file_type) / name
                 destination = root / relative
                 state = {"type": file_type, "name": name, "manifest_hash": content_hash,
                          "relative_path": str(relative), "url": url}
@@ -352,16 +356,108 @@ def main() -> int:
     run["file_states"].append(file_state(file_type="signature_verification", name=manifest_path.name, section=key,
         status="not_processed", reason="No trusted key/configuration is available."))
     run["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
-    run["diagnostic_summary"] = summarize_diagnostics(run["diagnostics"], run["file_states"])
-    save_atomic(root / "collection.json", json.dumps(run, ensure_ascii=False, indent=2).encode())
-    print(json.dumps({"section_key": key, "signature_status": run["signature_status"],
-                      "manifest_sha256": run.get("manifest_sha256"),
-                      "downloaded": [{"type": f["type"], "name": f["name"],
-                                      "size_bytes": f["size_bytes"], "sha256": f["sha256"]}
-                                     for f in run["files"]],
-                      "diagnostic_count": len(run["diagnostics"]), "diagnostics": run["diagnostics"],
-                      "file_states": run["file_states"], "acquisition_id": acquisition_id,
-                      "report": str(root / "collection.json")}, ensure_ascii=False, indent=2))
+
+    pleito_id = None
+    detected_turn = None
+    bu_entry = next((item for item in run["files"] if item.get("type") == "bu"), None)
+    if bu_entry:
+        try:
+            from analyze_section import decode_bu
+            bu_data = decode_bu(root / bu_entry["relative_path"], Path(__file__).resolve().parent.parent / "schemas/bu.asn1")
+            pleito_id = bu_data.get("pleito_id")
+            detected_turn = bu_data.get("turno")
+        except Exception as error:
+            run["diagnostics"].append(diagnostic(code="COLLECT_TURN_DETECTION_FAILED", stage="semantic_validation",
+                operation="read_bu_electoral_identifier", error_type="semantic_validation", cause=str(error),
+                recoverability="indeterminate", section=key, file_type="bu", file_name=bu_entry.get("name"),
+                file_path=str(root / bu_entry["relative_path"]), exception=error,
+                context={"data_id": args.data_id, "turn_detection_source": "BU ASN.1 header"}))
+    expected_turn = {"3220": 1, "3221": 2}.get(args.data_id)
+    if detected_turn is not None and expected_turn is not None and detected_turn != expected_turn:
+        run["diagnostics"].append(diagnostic(code="COLLECT_DATA_TURN_MISMATCH", stage="semantic_validation",
+            operation="compare_manifest_dataset_and_bu_turn", error_type="semantic_validation",
+            cause="BU-derived turn differs from the requested TSE data set.", recoverability="indeterminate",
+            section=key, file_type="bu", file_name=bu_entry.get("name"),
+            context={"data_id": args.data_id, "expected_turn_from_dataset": expected_turn,
+                     "observed_turn_from_bu": detected_turn, "pleito_id": pleito_id}))
+
+    turn_directory = folder_for_pleito(pleito_id)
+    final_root = section_root / turn_directory / "runs" / acquisition_id
+    log_root = section_root / "logs" / "runs" / acquisition_id
+    final_root.mkdir(parents=True, exist_ok=True)
+    for item in run["files"]:
+        source = root / item["relative_path"]
+        if item["type"] == "log":
+            destination = log_root / item["name"]
+            relative = Path(os.path.relpath(destination, final_root))
+        else:
+            destination = final_root / item["type"] / item["name"]
+            relative = Path(item["type"]) / item["name"]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if source.exists():
+            os.replace(source, destination)
+        item["relative_path"] = str(relative)
+    for state in run["file_states"]:
+        if state.get("status") != "partial" or not state.get("path"):
+            continue
+        file_type, name = state.get("type"), state.get("name")
+        source = root / state["path"]
+        if not source.exists():
+            continue
+        if file_type == "log":
+            destination = log_root / source.name
+            state["path"] = os.path.relpath(destination, final_root)
+        elif file_type in {"bu", "rdv"}:
+            destination = final_root / file_type / source.name
+            state["path"] = str(Path(file_type) / source.name)
+        else:
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(source, destination)
+    for state in run["file_states"]:
+        file_type, name = state.get("type"), state.get("name")
+        if not name:
+            continue
+        if file_type == "jws":
+            state["path"] = str(Path(name + ".partial" if state.get("status") == "partial" else name))
+        elif file_type == "signature_verification":
+            continue
+        elif file_type == "log":
+            dest = log_root / (name + ".partial" if state.get("status") == "partial" else name)
+            state["path"] = os.path.relpath(dest, final_root)
+        elif file_type in {"bu", "rdv"}:
+            if state.get("status") == "partial":
+                continue
+            filename = name
+            state["path"] = str(Path(file_type) / filename)
+    for item in run["diagnostics"]:
+        file_type, name = item.get("file_type"), item.get("file_name")
+        if file_type == "jws" and name:
+            item["file_path"] = str(final_root / (name + ".partial" if item.get("code", "").endswith("DOWNLOAD_INCOMPLETE") else name))
+        elif file_type == "log" and name:
+            item["file_path"] = str(log_root / (name + ".partial" if item.get("code", "").endswith("DOWNLOAD_INCOMPLETE") else name))
+        elif file_type in {"bu", "rdv"} and name:
+            item["file_path"] = str(final_root / file_type / (name + ".partial" if item.get("code", "").endswith("DOWNLOAD_INCOMPLETE") else name))
+    if manifest_path.exists():
+        os.replace(manifest_path, final_root / manifest_path.name)
+    manifest_partial_path = manifest_path.with_suffix(manifest_path.suffix + ".partial")
+    if manifest_partial_path.exists():
+        os.replace(manifest_partial_path, final_root / manifest_partial_path.name)
+    shutil.rmtree(root, ignore_errors=True)
+    try:
+        root.parent.rmdir()
+    except OSError:
+        pass
+    run["turno"] = detected_turn
+    run["pleito_id"] = pleito_id
+    run["turn_directory"] = turn_directory
+    run["turn_detection_source"] = "BU ASN.1 cabecalho.idEleitoral; unclassified when unavailable"
+    run["acquisition_path"] = str(final_root)
+    acquisition_path = final_root / "acquisition.json"
+    save_atomic(acquisition_path, json.dumps(run, ensure_ascii=False, indent=2).encode())
+    print(json.dumps({"section_key": key, "acquisition_id": acquisition_id,
+                      "turno": detected_turn, "pleito_id": pleito_id,
+                      "acquisition": str(acquisition_path)}, ensure_ascii=False))
     return 0
 
 

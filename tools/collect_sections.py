@@ -41,22 +41,22 @@ def collect_sections(sections: list[dict], output_root: Path, runner=subprocess.
                     position={"section_index": index}, context={"return_code": completed.returncode}))
             result_diagnostics = summary.get("diagnostics", [])
             diagnostics.extend(result_diagnostics)
-            if completed.returncode == 0 and (not summary.get("section_key") or not summary.get("report")):
+            if completed.returncode == 0 and (not summary.get("section_key") or not summary.get("acquisition")):
                 diagnostics.append(diagnostic(code="BATCH_COLLECTOR_RESULT_INCOMPLETE", stage="batch_collection",
                     operation="validate_collector_result", error_type="semantic_validation",
-                    cause="Collector completed without section identity or collection report path.", recoverability="indeterminate",
+                    cause="Collector completed without section identity or acquisition metadata path.", recoverability="indeterminate",
                     section=key, file_type="collection_result", file_name=None, file_path=None,
                     context={"return_code": completed.returncode}))
             results.append({"section": summary.get("section_key", key),
                 "status": "failed" if completed.returncode else "partial" if len(diagnostics) > diagnostics_before else "collected",
-                "return_code": completed.returncode, "collection_report": summary.get("report"),
+                "return_code": completed.returncode, "acquisition": summary.get("acquisition"),
                 "diagnostic_count": len(result_diagnostics), "file_states": summary.get("file_states", [])})
         except Exception as error:
             diagnostics.append(diagnostic(code="BATCH_SECTION_INVOCATION_FAILED", stage="batch_collection",
                 operation="invoke_collector", error_type="internal", cause=str(error), recoverability="indeterminate",
                 section=key, file_type="section", file_name=None, file_path=None, exception=error,
                 position={"section_index": index}, context={"command": command}))
-            results.append({"section": key, "status": "failed", "return_code": None, "collection_report": None,
+            results.append({"section": key, "status": "failed", "return_code": None, "acquisition": None,
                 "diagnostic_count": 1, "file_states": []})
     return {"report_type": "batch_collection", "data_id": data_id,
             "section_count": len(results), "sections": results,
@@ -69,7 +69,6 @@ def main() -> int:
                         help="JSON array or section-inventory report with a sections[] array")
     parser.add_argument("--data-id", default="3221", help="TSE arquivo-urna dataset ID (default: 3221)")
     parser.add_argument("--output", type=Path, default=Path("dados-brutos"))
-    parser.add_argument("--report", type=Path, required=True)
     args = parser.parse_args()
     try:
         sections = json.loads(args.sections.read_text(encoding="utf-8"))
@@ -88,8 +87,6 @@ def main() -> int:
                   "diagnostics": diagnostics, "diagnostic_summary": summarize_diagnostics(diagnostics)}
     else:
         result = collect_sections(sections, args.output, data_id=args.data_id)
-    args.report.parent.mkdir(parents=True, exist_ok=True)
-    args.report.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return 0
 
 

@@ -12,6 +12,7 @@ import asn1tools
 from rdv import decode_rdv
 from rdv import diagnose_rdv_failure
 from diagnostics import diagnostic, file_state, sha256_file, summarize_diagnostics
+from election_turns import turn_for_pleito
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -134,8 +135,13 @@ def decode_bu(bu_path: Path, schema_path: Path) -> dict:
         detail, detail_sum = None, None
     urna_type = bu["urna"]["tipoUrna"]
     load_codes = bu.get("historicoCodigosCarga", [])
+    electoral_identifier = bu.get("cabecalho", {}).get("idEleitoral")
+    electoral_identifier_kind, electoral_identifier_value = electoral_identifier if electoral_identifier else (None, None)
+    pleito_id = electoral_identifier_value if electoral_identifier_kind == "idPleito" else None
     data = {
         "phase": envelope["fase"], "envelope_type": envelope["tipoEnvelope"],
+        "electoral_identifier": {"kind": electoral_identifier_kind, "value": electoral_identifier_value},
+        "pleito_id": pleito_id, "turno": turn_for_pleito(pleito_id),
         "section": bu["identificacaoSecao"], "emitted_at_raw": bu["dataHoraEmissao"],
         "election_date": election_date, "urn_type": urna_type,
         "qtd_eleitores_compareceram": bu["qtdEleitoresCompareceram"],
@@ -186,6 +192,8 @@ def analyze(log_path: Path, bu_path: Path, collection_path: Path, cuts: list[str
             hhmm = timestamp.strftime("%H:%M")
             events.append({"source_file_sha256": metadata["sha256"], "line_number": line_number,
                            "event_type": event_type, "event_timestamp_raw": fields[0],
+                           "event_date": date, "event_time": hhmm,
+                           "at_or_after_clock_cuts": [cut for cut in cuts if hhmm >= cut],
                            "event_timezone": "unknown", "event_timestamp_utc": None,
                            "event_timestamp_brt": None, "parser_status": "allowlist_match"})
             counts_by_date[date][event_type] += 1
@@ -409,7 +417,10 @@ def process_log_file(path: Path, metadata: dict, section: str, cuts: list[str]) 
             continue
         hhmm = timestamp.strftime("%H:%M")
         events.append({"source_file_sha256": metadata["sha256"], "line_number": line_number,
-            "event_type": event_type, "event_timestamp_raw": fields[0], "event_timezone": "unknown",
+            "event_type": event_type, "event_timestamp_raw": fields[0],
+            "event_date": timestamp.strftime("%Y-%m-%d"), "event_time": hhmm,
+            "at_or_after_clock_cuts": [cut for cut in cuts if hhmm >= cut],
+            "event_timezone": "unknown",
             "event_timestamp_utc": None, "event_timestamp_brt": None, "parser_status": "allowlist_match"})
         counts[event_type] += 1
         event_date = timestamp.strftime("%Y-%m-%d")
