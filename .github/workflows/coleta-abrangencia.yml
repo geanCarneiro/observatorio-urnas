@@ -13,22 +13,22 @@ on:
           - '2'
           - ambos
       uf:
-        description: UF (vazio para todas as UFs e exterior)
+        description: UFs separadas por vírgula (vazio para todas as UFs e exterior)
         type: string
         required: false
         default: ''
       municipio:
-        description: Código TSE do município (opcional)
+        description: Códigos TSE de municípios separados por vírgula (exige UF)
         type: string
         required: false
         default: ''
       zona:
-        description: Zona (opcional; mantenha zeros à esquerda)
+        description: Zonas separadas por vírgula, mantendo zeros à esquerda (exige município)
         type: string
         required: false
         default: ''
       secao:
-        description: Seção (opcional; mantenha zeros à esquerda)
+        description: Seções separadas por vírgula, mantendo zeros à esquerda (exige zona)
         type: string
         required: false
         default: ''

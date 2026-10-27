@@ -17,6 +17,10 @@ python tools/discover_sections.py --uf es --municipio 56251 --zona 0054 --secao 
 # Todas as seções da zona 0054 de Cariacica
 python tools/discover_sections.py --uf es --municipio 56251 --zona 0054 --limit 1000
 
+# Selecionar várias seções em zonas e municípios dentro das UFs indicadas
+python tools/discover_sections.py --uf "es, mg" --municipio "56251, 41009" \
+  --zona "0054, 0050" --secao "0509, 0224" --limit 100
+
 # Descubra até 5.000 seções; depois colete uma faixa de até 100
 python tools.discover_sections.py --limit 5000 --offset 0
 python tools/collect_sections.py --sections inventario/section-inventory.json --data-id 3221 \
@@ -38,7 +42,7 @@ Os originais e seus JSONs estruturados ficam juntos sob `dados/`, ignorado pelo 
 
 ## GitHub Actions
 
-Na aba **Actions**, escolha **Coleta por abrangência** e o turno (`1`, `2` ou `ambos`). Informe qualquer combinação de UF, município, zona e seção; cada campo vazio amplia o escopo. `offset` e `max_secoes` definem a página selecionada, com até 5.000 seções por turno; o workflow divide a página em faixas de até 100 e executa um job independente e sequencial para cada faixa. Cada job tem timeout próprio de 180 minutos, e os arquivos das faixas concluídas são reunidos em um artefato final por 90 dias. O workflow é manual.
+Na aba **Actions**, escolha **Coleta por abrangência** e o turno (`1`, `2` ou `ambos`). UF, município, zona e seção aceitam listas de códigos separadas por vírgula, com espaços opcionais. Os filtros são cumulativos e obedecem à hierarquia: município exige UF, zona exige município, e seção exige zona. Cada código filho precisa existir dentro do conjunto dos pais escolhidos; a validação ocorre durante a descoberta, antes de gerar jobs de coleta. Campos vazios ampliam o escopo dentro do filtro pai. `offset` e `max_secoes` definem a página selecionada, com até 5.000 seções por turno; o workflow divide a página em faixas de até 100 e executa um job independente e sequencial para cada faixa. Cada job tem timeout próprio de 180 minutos, e os arquivos das faixas concluídas são reunidos em um artefato final por 90 dias. O workflow é manual.
 
 Cada seção fica sob `dados/<uf>/<municipio>/<zona>/<secao>/`. A coleta organiza BU e RDV em `turno-1/` ou `turno-2/`, usando o `idPleito` extraído do BU; o log fica na pasta `logs/` da seção e os eventos têm um JSON extraído ao lado do original. Os JSONs de BU e RDV também ficam ao lado dos arquivos originais. `acquisition.json` preserva URL, hashes, estado e proveniência da aquisição. Um `vota.vsc` listado no manifesto é registrado como não aplicável e não é baixado. O JSON do log preserva cada evento e seu timestamp, sem faixas horárias, contagens consolidadas ou relatório paralelo.
 

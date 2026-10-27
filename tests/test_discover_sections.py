@@ -7,7 +7,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from discover_sections import discover, filter_sections, section_records
+from discover_sections import (discover, filter_sections, normalize_filter_values,
+    section_records, validate_filter_hierarchy)
 from section_aggregation import aggregation_counts, link_aggregations
 
 
@@ -80,6 +81,37 @@ class DiscoverSectionsTests(unittest.TestCase):
         ]
         self.assertEqual(filter_sections(records, uf="es", municipio="56251", zona="0054", secao="0509"), [records[0]])
 
+    def test_filter_lists_trim_spaces_preserve_zeroes_and_deduplicate(self):
+        self.assertEqual(normalize_filter_values("ES, mg, es", 2, "uf", lowercase=True), ["es", "mg"])
+        self.assertEqual(normalize_filter_values(" 54, 0055 ", 4, "zona"), ["0054", "0055"])
+        self.assertEqual(normalize_filter_values("", 4, "secao"), None)
+        with self.assertRaisesRegex(ValueError, "empty value"):
+            normalize_filter_values("0509, , 0510", 4, "secao")
+
+    def test_descendant_filters_require_every_parent_level(self):
+        cases = [
+            (None, ["56251"], None, None, "municipio.*UF"),
+            (["es"], ["56251"], ["0054"], None, None),
+            (["es"], ["56251"], None, ["0509"], "secao.*zona"),
+        ]
+        for uf, municipio, zona, secao, error in cases:
+            if error is None:
+                validate_filter_hierarchy(uf, municipio, zona, secao)
+            else:
+                with self.subTest(error=error), self.assertRaisesRegex(ValueError, error):
+                    validate_filter_hierarchy(uf, municipio, zona, secao)
+
+    def test_filter_lists_intersect_all_selected_parent_sets(self):
+        records = [
+            {"uf": "es", "municipio": "56251", "zona": "0054", "secao": "0509"},
+            {"uf": "es", "municipio": "56251", "zona": "0054", "secao": "0510"},
+            {"uf": "mg", "municipio": "41009", "zona": "0050", "secao": "0224"},
+            {"uf": "mg", "municipio": "41009", "zona": "0034", "secao": "0509"},
+        ]
+        selected = filter_sections(records, uf=["es", "mg"], municipio=["56251", "41009"],
+                                   zona=["0054", "0050"], secao=["0509", "0224"])
+        self.assertEqual(selected, [records[0], records[2]])
+
     def test_discovery_preserves_catalog_bytes_and_writes_filtered_inventory_report(self):
         payload = {"cdp": "3220", "dg": "05/10/2026", "abr": [{"cd": "es", "mu": [{"cd": "56251", "nm": "CARIACICA",
             "zon": [{"cd": "0054", "sec": [{"ns": "0509", "da": "04/10/2026", "ha": "20:57:17"},
@@ -98,6 +130,53 @@ class DiscoverSectionsTests(unittest.TestCase):
             self.assertEqual(original.read_bytes(), raw)
             saved_report = json.loads((Path(temp) / "section-inventory.json").read_text())
             self.assertEqual(saved_report["sections"], result["sections"])
+
+    def test_discovery_accepts_multiple_values_and_checks_child_membership(self):
+        payloads = {
+            "es": {"cdp": "3220", "abr": [{"cd": "es", "mu": [{"cd": "56251", "nm": "CARIACICA",
+                "zon": [{"cd": "0054", "sec": [{"ns": "0509"}, {"ns": "0510"}]},
+                        {"cd": "0034", "sec": [{"ns": "0509"}]}]}]}]},
+            "mg": {"cdp": "3220", "abr": [{"cd": "mg", "mu": [{"cd": "41009", "nm": "EXAMPLE",
+                "zon": [{"cd": "0050", "sec": [{"ns": "0224"}]}]}]}]},
+        }
+        def fetch_for_uf(url):
+            uf = "es" if "/es/" in url else "mg"
+            return jws(payloads[uf]), {"status": "200"}
+        with tempfile.TemporaryDirectory() as temp, patch("discover_sections.fetch", side_effect=fetch_for_uf):
+            result = discover(config_id="3220", output=Path(temp), uf="ES, mg",
+                municipio=" 56251, 41009", zona="0054, 0050", secao="0509, 0224", limit=10)
+        self.assertEqual(result["matching_section_count"], 2)
+        self.assertEqual([row["secao"] for row in result["sections"]], ["0509", "0224"])
+        self.assertEqual(result["filters"], {"uf": ["es", "mg"], "municipio": ["56251", "41009"],
+            "zona": ["0054", "0050"], "secao": ["0509", "0224"]})
+
+    def test_discovery_rejects_child_codes_absent_from_selected_parent_scope(self):
+        payload = {"cdp": "3220", "abr": [{"cd": "es", "mu": [{"cd": "56251", "nm": "CARIACICA",
+            "zon": [{"cd": "0054", "sec": [{"ns": "0509"}, {"ns": "0510"}]},
+                    {"cd": "0034", "sec": [{"ns": "0509"}]}]}]}]}
+        raw = jws(payload)
+        with tempfile.TemporaryDirectory() as temp, patch("discover_sections.fetch", return_value=(raw, {"status": "200"})):
+            with self.assertRaisesRegex(ValueError, "secao.*0510"):
+                discover(config_id="3220", output=Path(temp), uf="es", municipio="56251",
+                    zona="0034", secao="0510", limit=10)
+
+    def test_discovery_does_not_select_jobs_when_a_parent_catalog_is_unavailable(self):
+        payload = {"cdp": "3220", "abr": [{"cd": "es", "mu": [{"cd": "56251", "nm": "CARIACICA",
+            "zon": [{"cd": "0054", "sec": [{"ns": "0509"}]}]}]}]}
+        def fetch_for_uf(url):
+            if "/mg/" in url:
+                raise ConnectionError("fixture catalog unavailable")
+            return jws(payload), {"status": "200"}
+        with tempfile.TemporaryDirectory() as temp, patch("discover_sections.fetch", side_effect=fetch_for_uf):
+            with self.assertRaisesRegex(ValueError, "cannot validate child filters"):
+                discover(config_id="3220", output=Path(temp), uf="es,mg", municipio="56251",
+                    zona="0054", secao="0509", limit=10)
+
+    def test_invalid_hierarchy_is_rejected_before_fetching_catalogs(self):
+        with tempfile.TemporaryDirectory() as temp, patch("discover_sections.fetch") as fetch_catalog:
+            with self.assertRaisesRegex(ValueError, "municipio.*UF"):
+                discover(config_id="3220", output=Path(temp), municipio="56251")
+            fetch_catalog.assert_not_called()
 
 
 if __name__ == "__main__":
