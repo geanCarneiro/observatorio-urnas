@@ -409,7 +409,8 @@ def presidential_only_confirmed_vote_count(session_reconstruction: dict, event_d
 
 
 def reconcile_section(index: TransferReferenceIndex, section_key: str, turn: int | None,
-                      log_metric: dict | None, event_date: str | None = None) -> dict:
+                      log_metric: dict | None, event_date: str | None = None,
+                      ballot_cargos: list[str] | None = None) -> dict:
     parts = section_key.split("/") if isinstance(section_key, str) else []
     if len(parts) != 4:
         return {"status": "dados_insuficientes", "reason": "section key must be uf/municipio/zona/secao"}
@@ -426,6 +427,11 @@ def reconcile_section(index: TransferReferenceIndex, section_key: str, turn: int
         status, reason = "dados_insuficientes", "The reference CSV was only partially parsed."
     elif turn != 2:
         status, reason = "dados_insuficientes", "This comparison is scoped to the second election round."
+    elif ballot_cargos is not None and {str(cargo).casefold() for cargo in ballot_cargos} == {"presidente"}:
+        status, reason = "nao_aplicavel", (
+            "The decoded BU contains only the presidential contest for this round; a presidential-only "
+            "session is expected for every voter and cannot distinguish temporary-transfer voters."
+        )
     elif not metric_complete or not log_count_valid:
         status, reason = "dados_insuficientes", "No complete log metric for confirmed presidential votes is available."
     elif log_count == expected:
@@ -438,6 +444,7 @@ def reconcile_section(index: TransferReferenceIndex, section_key: str, turn: int
     return {
         "section_key": section_key, "uf": uf.upper(), "municipio": municipality.zfill(5),
         "zona": zone.zfill(4), "secao": section.zfill(4), "turno": turn,
+        "ballot_cargos": ballot_cargos,
         "status": status, "reason": reason, "log_presidential_only_confirmed_votes": log_count,
         "log_metric_detail": log_metric, "reference_federal_transfer_count": expected,
         "reference_transfer_type_scope_breakdown": breakdown,

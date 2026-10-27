@@ -26,6 +26,12 @@ VOTE_TYPES = {
     "nuloAposSuspensaoCargoSemCandidato": "null_after_suspension_office_without_candidate",
 }
 
+# In Brazilian proportional elections, the party number is the two-digit
+# prefix of the number entered at the voting terminal. Keep the complete
+# NumericString separately because it is the source record, not itself the
+# party key used by the BU.
+PARTY_NUMBER_DIGITS = 2
+
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -230,6 +236,7 @@ def decode_rdv(rdv_path: Path, collection_path: Path, schema_path: Path, bu: dic
             candidate_raw_digit_counts: Counter[str] = Counter()
             party_counts: Counter[str] = Counter()
             party_raw_digit_counts: Counter[str] = Counter()
+            unresolved_party_number_count = 0
             for position, (vote, node) in enumerate(zip(cargo_value["votos"], cchildren[2].children), 1):
                 encoded = entity_raw[node.start:node.end]
                 try:
@@ -250,14 +257,22 @@ def decode_rdv(rdv_path: Path, collection_path: Path, schema_path: Path, bu: dic
                     candidate_counts[str(int(digitacao))] += 1
                     candidate_raw_digit_counts[str(digitacao)] += 1
                 if digitacao is not None and vote_type == "legenda":
-                    party_counts[str(int(digitacao))] += 1
+                    party_prefix = str(digitacao)[:PARTY_NUMBER_DIGITS]
+                    if len(party_prefix) == PARTY_NUMBER_DIGITS:
+                        party_counts[str(int(party_prefix))] += 1
+                    else:
+                        unresolved_party_number_count += 1
                     party_raw_digit_counts[str(digitacao)] += 1
+                elif vote_type == "legenda":
+                    unresolved_party_number_count += 1
                 votes.append({
                     "record_position_within_election_and_cargo": position,
                     "vote_type": vote_type,
                     "vote_type_code_meaning": VOTE_TYPES.get(vote_type, "unmapped_type_preserved"),
                     "digitacao_raw": digitacao,
-                    "digitacao_meaning": "candidate_number" if vote_type == "nominal" else "party_number" if vote_type == "legenda" else ("present_but_semantics_unmapped" if digitacao is not None else None),
+                    "digitacao_meaning": "candidate_number" if vote_type == "nominal" else "raw_voter_input_for_legend" if vote_type == "legenda" else ("present_but_semantics_unmapped" if digitacao is not None else None),
+                    "party_number_prefix_from_legend_digitacao": (str(digitacao)[:PARTY_NUMBER_DIGITS]
+                        if digitacao is not None and vote_type == "legenda" and len(str(digitacao)) >= PARTY_NUMBER_DIGITS else None),
                     "record_original_ber_hex": encoded.hex(),
                     "record_original_length_bytes": len(encoded),
                 })
@@ -272,6 +287,8 @@ def decode_rdv(rdv_path: Path, collection_path: Path, schema_path: Path, bu: dic
                 "candidate_number_counts_from_nominal_votes": dict(sorted(candidate_counts.items())),
                 "candidate_number_counts_by_raw_digitacao": dict(sorted(candidate_raw_digit_counts.items())),
                 "party_number_counts_from_legend_votes": dict(sorted(party_counts.items())),
+                "party_number_derivation": "two-digit prefix of legend digitacao; original digitacao is preserved per record",
+                "legend_votes_without_derivable_party_number": unresolved_party_number_count,
                 "party_number_counts_by_raw_digitacao": dict(sorted(party_raw_digit_counts.items())),
                 "records": votes,
             })

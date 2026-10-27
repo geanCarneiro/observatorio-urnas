@@ -1398,6 +1398,13 @@ def analyze_collection(collection_path: Path, cuts: list[str], bu_schema_path: P
         from temporary_transfer import load_reference, reconcile_section
         decoded_bu = next((item.get("data") for item in bu_results if item.get("data")), None)
         round_number = (decoded_bu or {}).get("turno", collection.get("turno"))
+        ballot_cargos = sorted({
+            str(cargo.get("cargo"))
+            for election in (decoded_bu or {}).get("elections", [])
+            for result in election.get("results", [])
+            for cargo in result.get("cargos", [])
+            if cargo.get("cargo") is not None
+        }) if decoded_bu else None
         recon = (legacy_report or {}).get("validation", {}).get("bu_reconciliation", {})
         log_metric = recon.get("by_metric", {}).get("votos_confirmados_exclusivamente_presidente")
         event_date = (decoded_bu or {}).get("election_date")
@@ -1407,7 +1414,8 @@ def analyze_collection(collection_path: Path, cuts: list[str], bu_schema_path: P
         elif round_number != 2:
             transfer_reconciliation["reason"] = "Temporary-transfer comparison is configured only for the second round."
         else:
-            transfer_reconciliation = reconcile_section(load_reference(), section, round_number, log_metric, event_date)
+            transfer_reconciliation = reconcile_section(load_reference(), section, round_number, log_metric,
+                                                         event_date, ballot_cargos=ballot_cargos)
     except Exception as error:
         transfer_reconciliation.update({"section_key": section, "turno": round_number,
             "status": "dados_insuficientes",

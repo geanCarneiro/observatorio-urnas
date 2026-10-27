@@ -28,7 +28,7 @@ class RDVDecoderTests(unittest.TestCase):
             "eleicoes": ("eleicoesVota", [{"idEleicao": 6258, "votosCargos": [
                 {"idCargo": ("cargoConstitucional", "presidente"), "quantidadeEscolhas": 1, "votos": [
                     {"tipoVoto": "nominal", "digitacao": "013"}, {"tipoVoto": "branco"},
-                    {"tipoVoto": "nulo"}, {"tipoVoto": "legenda", "digitacao": "22"},
+                    {"tipoVoto": "nulo"}, {"tipoVoto": "legenda", "digitacao": "2201"},
                     {"tipoVoto": "brancoAposSuspensao"},
                 ]},
             ]}]),
@@ -57,6 +57,12 @@ class RDVDecoderTests(unittest.TestCase):
         self.assertEqual(cargo["candidate_number_counts_from_nominal_votes"], {"13": 1})
         self.assertEqual(cargo["candidate_number_counts_by_raw_digitacao"], {"013": 1})
         self.assertEqual(cargo["party_number_counts_from_legend_votes"], {"22": 1})
+        legend = next(item for item in cargo["records"] if item["vote_type"] == "legenda")
+        self.assertEqual(legend["digitacao_raw"], "2201")
+        self.assertEqual(legend["party_number_prefix_from_legend_digitacao"], "22")
+        self.assertEqual(legend["digitacao_meaning"], "raw_voter_input_for_legend")
+        comparison = report["reconciliation_with_bu"]["by_cargo"][0]["party_numbers"]["22"]
+        self.assertEqual(comparison, {"rdv": 1, "bu": 1, "divergence": 0})
         self.assertEqual(cargo["white_votes_total"], 2)
         self.assertEqual(cargo["null_votes_total"], 1)
         self.assertEqual(bytes.fromhex(cargo["records"][0]["record_original_ber_hex"])[0], 0x30)

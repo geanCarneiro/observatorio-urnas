@@ -87,6 +87,30 @@ class TemporaryTransferTests(unittest.TestCase):
             self.assertEqual(reconcile_section(index, "es/56251/0054/0067", 2, None)["status"], "dados_insuficientes")
             self.assertFalse(reconcile_section(index, "es/56251/0054/0067", 2, complete)["individual_session_tte_join_performed"])
 
+    def test_presidential_only_ballot_does_not_treat_all_sessions_as_temporary_transfer_signal(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            reference_row = row("0224", "Voto em Trânsito", "Federal", 3)
+            reference_row["NR_ZONA_DESTINO"] = "50"
+            index = index_from_rows(Path(temporary), [reference_row])
+            metric = {"count": 71, "status": "incomplete", "unassigned_event_count": 116,
+                      "reconciliation_relevant_unassigned_event_count": 116}
+            result = reconcile_section(index, "es/56251/0050/0224", 2, metric,
+                                       "2026-10-25", ballot_cargos=["presidente"])
+            self.assertEqual(result["status"], "nao_aplicavel")
+            self.assertEqual(result["reference_federal_transfer_count"], 3)
+            self.assertEqual(result["log_presidential_only_confirmed_votes"], 71)
+            self.assertEqual(result["ballot_cargos"], ["presidente"])
+            self.assertIn("cannot distinguish temporary-transfer voters", result["reason"])
+
+    def test_presidential_only_signal_remains_comparable_when_another_cargo_was_on_ballot(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            index = index_from_rows(Path(temporary), [row("0067", "Voto em Trânsito", "Federal", 13)])
+            metric = {"count": 13, "status": "complete", "reconciliation_relevant_unassigned_event_count": 0}
+            result = reconcile_section(index, "es/56251/0054/0067", 2, metric,
+                                       ballot_cargos=["presidente", "governador"])
+            self.assertEqual(result["status"], "confirmado")
+            self.assertEqual(result["ballot_cargos"], ["presidente", "governador"])
+
     def test_nonsecond_turn_and_incomplete_reference_are_insufficient(self):
         with tempfile.TemporaryDirectory() as temporary:
             index = index_from_rows(Path(temporary), [row("0037", "Voto em Trânsito", "Federal", 1)])
