@@ -5,7 +5,7 @@ Esta página documenta a configuração inicial do piloto da aplicação. Ela n�
 ## Organização dos dados
 
 - Guardar uma linha por evento permitido, timestamp original, posição no arquivo e hash da origem.
-- Manter separados habilitação, voto computado, confirmações por cargo e comando/início/conclusão de encerramento. Mensagens brutas e identificadores pessoais ficam excluídos.
+- Manter separados habilitação, confirmações computadas por cargo, fim da sessão de votação e comando/início/conclusão do encerramento. Mensagens brutas e identificadores pessoais ficam excluídos.
 - Preservar eventos um a um com timestamp original, data e hora. A extração não aplica cortes horários nem consolida eventos; os horários refletem o relógio do arquivo até que seu fuso seja validado.
 - Verificar os hashes dos arquivos contra o registro da aquisição, integridade ZIP e identificação da seção no envelope BU.
 - Registrar estado explícito para fuso, assinatura, possíveis substituições e reconciliação de contagens. Falhas de schema deixam contagens BU e divergências como indisponíveis; não presumem equivalência.

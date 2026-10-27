@@ -21,12 +21,13 @@ from pathlib import Path
 
 EVENTS = {
     "Eleitor foi habilitado": "habilitacao",
-    "O voto do eleitor foi computado": "voto_computado",
+    "O voto do eleitor foi computado": "fim_sessao_votacao",
     "Voto confirmado para [Governador]": "voto_confirmado_governador",
     "Voto confirmado para [Presidente]": "voto_confirmado_presidente",
     "Inicio do Encerramento": "inicio_encerramento",
     "Operador selecionou: Encerrar votação": "comando_encerramento",
     "Procedimento de encerramento confirmado": "conclusao_encerramento",
+    "Voto confirmado para [<cargo>]": "voto_confirmado_<cargo>",
 }
 EVENT_KEYWORDS = {
     "deslig": "desligamento",
@@ -34,6 +35,7 @@ EVENT_KEYWORDS = {
     "reinicial": "reinicializacao",
     "falha": "falha",
     "erro": "falha",
+    "inicializ": "inicializacao",
     "suspens": "suspensao",
     "interrup": "interrupcao",
     "cancel": "interrupcao",
@@ -43,16 +45,18 @@ POTENTIALLY_RELEVANT_KEYWORDS = (
     "falha", "erro", "cancel", "deslig", "reinici", "reinicial", "encerr",
 )
 VOTING_EVIDENCE_TYPES = {
-    "habilitacao", "voto_confirmado_governador", "voto_confirmado_presidente", "voto_computado",
+    "habilitacao", "voto_confirmado_governador", "voto_confirmado_presidente",
 }
+SESSION_END_EVENT_TYPES = {"fim_sessao_votacao"}
 OPERATIONAL_LIFECYCLE_TYPES = {
-    "suspensao", "interrupcao", "falha", "desligamento", "reinicializacao",
+    "suspensao", "interrupcao", "falha", "desligamento", "reinicializacao", "inicializacao",
 }
 ADMINISTRATIVE_EVENT_TYPES = {
     "comando_encerramento", "inicio_encerramento", "conclusao_encerramento",
 }
 INTERRUPTED_SESSION_STATUSES = {
     "suspensa_sem_voto", "interrompida_por_falha", "interrompida_por_desligamento",
+    "interrompida_por_inicializacao",
 }
 DEFAULT_CUTS = ("17:00", "17:15", "17:30", "17:45", "18:00", "18:30", "19:00")
 BU_SCHEMA_SOURCE = "https://www.tse.jus.br/eleicoes/eleicoes-2026-content/arquivos/formato-arquivos-de-bu-rdv-e-assinatura-digital"
@@ -98,17 +102,58 @@ def sha256(path: Path) -> str:
 
 
 def _event_type(message: str) -> str | None:
-    exact = EVENTS.get(message)
-    if exact:
-        return exact
     normalized = unicodedata.normalize("NFKD", message.casefold())
     normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+    exact = next((event_type for known_message, event_type in EVENTS.items()
+                  if known_message != "Voto confirmado para [<cargo>]"
+                  and _normalize_event_message(known_message) == normalized), None)
+    if exact:
+        return exact
+    confirmation = re.fullmatch(r"voto confirmado para \[([^\[\]]+)\]", normalized)
+    if confirmation:
+        cargo = _cargo_slug(confirmation.group(1))
+        if cargo:
+            return f"voto_confirmado_{cargo}"
     for keyword, event_type in EVENT_KEYWORDS.items():
         if keyword in normalized:
             return event_type
     if any(keyword in normalized for keyword in POTENTIALLY_RELEVANT_KEYWORDS):
         return "evento_desconhecido_relevante"
     return None
+
+
+def _normalize_event_message(message: str) -> str:
+    normalized = unicodedata.normalize("NFKD", message.casefold())
+    return "".join(char for char in normalized if not unicodedata.combining(char))
+
+
+def _is_cargo_confirmation(event_type: str | None) -> bool:
+    return isinstance(event_type, str) and event_type.startswith("voto_confirmado_")
+
+
+def _cargo_slug(label: str) -> str:
+    normalized = _normalize_event_message(label)
+    slug = re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
+    aliases = {
+        "presidente_da_republica": "presidente",
+        "governador_do_estado": "governador",
+        "primeiro_suplente_de_senador": "primeiro_suplente_senador",
+        "segundo_suplente_de_senador": "segundo_suplente_senador",
+    }
+    return aliases.get(slug, slug)
+
+
+def _cargo_confirmation_label(message: str) -> str | None:
+    confirmation = re.fullmatch(r"\s*voto confirmado para \[([^\[\]]+)\]\s*", message, re.IGNORECASE)
+    return confirmation.group(1).strip() if confirmation else None
+
+
+BU_CARGO_LABELS = {
+    1: "presidente", 2: "vice_presidente", 3: "governador", 4: "vice_governador",
+    5: "senador", 6: "deputado_federal", 7: "deputado_estadual", 8: "deputado_distrital",
+    9: "primeiro_suplente_senador", 10: "segundo_suplente_senador", 11: "prefeito",
+    12: "vice_prefeito", 13: "vereador",
+}
 
 
 def classify_unassigned_event(item: dict) -> dict:
@@ -122,7 +167,11 @@ def classify_unassigned_event(item: dict) -> dict:
         return {"classification": "administrative", "reconciliation_relevant": False,
                 "reconciliation_impact": "informational",
                 "classification_reason": "Administrative election/closure event is retained separately from voter-session evidence."}
-    if event_type in VOTING_EVIDENCE_TYPES:
+    if event_type in SESSION_END_EVENT_TYPES:
+        return {"classification": "session_termination_without_session", "reconciliation_relevant": True,
+                "reconciliation_impact": "blocking",
+                "classification_reason": "Session-ending event has no open habilitation to associate with its voting session."}
+    if event_type in VOTING_EVIDENCE_TYPES or _is_cargo_confirmation(event_type):
         return {"classification": "voting_evidence_without_session", "reconciliation_relevant": True,
                 "reconciliation_impact": "blocking",
                 "classification_reason": "Voting evidence without an associated habilitation can affect session and vote interpretation."}
@@ -140,6 +189,7 @@ def _interruption_classification(session: dict) -> tuple[str, dict | None]:
         "falha": "interrompida_por_falha",
         "desligamento": "interrompida_por_desligamento",
         "reinicializacao": "interrompida_por_desligamento",
+        "inicializacao": "interrompida_por_inicializacao",
     }
     for event in state_events:
         status = classification.get(event.get("event_type"))
@@ -149,11 +199,12 @@ def _interruption_classification(session: dict) -> tuple[str, dict | None]:
 
 
 def reconstruct_voting_sessions(events: list[dict]) -> dict:
-    """Group the log sequence without treating an isolated confirmation as a computed vote."""
+    """Group cargo vote confirmations into sessions and treat the final marker as session termination."""
     sessions = []
     unassigned = []
     active_by_equipment: dict[str, dict] = {}
     session_numbers = Counter()
+    associated_event_count = 0
 
     def finish(equipment: str, status: str, end_event: dict | None = None,
                closure_trigger_event: dict | None = None) -> dict | None:
@@ -163,13 +214,16 @@ def reconstruct_voting_sessions(events: list[dict]) -> dict:
         current["status"] = status
         current["end_event"] = end_event
         current["closure_trigger_event"] = closure_trigger_event or end_event
-        current["computed"] = status == "computed"
-        current["completion_after_lifecycle_event"] = bool(current["computed"] and current["state_events"])
+        current["completed"] = status == "completed"
+        current["session_end_event"] = end_event if status == "completed" else None
+        current["completion_after_lifecycle_event"] = bool(current["completed"] and current["state_events"])
         if status in INTERRUPTED_SESSION_STATUSES or status == "incompleta_indeterminada":
             current["interruption_classification"] = status
+        cargos = {"governador", "presidente"}
+        cargos.update(event["cargo"] for event in current["confirmation_events"])
         current["cargo_confirmations"] = {
             cargo: [event for event in current["confirmation_events"] if event["cargo"] == cargo]
-            for cargo in ("governador", "presidente")
+            for cargo in sorted(cargos)
         }
         sessions.append(current)
         return current
@@ -193,7 +247,7 @@ def reconstruct_voting_sessions(events: list[dict]) -> dict:
                 "habilitation_event": event,
                 "confirmation_events": [],
                 "state_events": [],
-                "computed_event": None,
+                "session_end_event": None,
             }
             if (previous and previous.get("state_events")
                     and previous.get("habilitation_event", {}).get("event_date") == event.get("event_date")
@@ -216,32 +270,37 @@ def reconstruct_voting_sessions(events: list[dict]) -> dict:
                     "reason": "A new habilitation follows an explicitly interrupted session in the same log stream, but logs contain no elector/session identifier to prove this is the same elector; sessions are not merged.",
                 }
             active_by_equipment[equipment] = current
-        elif kind in {"voto_confirmado_governador", "voto_confirmado_presidente"}:
+            associated_event_count += 1
+        elif _is_cargo_confirmation(kind):
             current = active_by_equipment.get(equipment)
             if current is None:
                 unassigned.append({"reason": "confirmation_without_open_habilitation", "event": event})
             else:
-                cargo = "governador" if kind.endswith("governador") else "presidente"
+                cargo = event.get("cargo") or kind.removeprefix("voto_confirmado_")
                 current["confirmation_events"].append({**event, "cargo": cargo})
-        elif kind == "voto_computado":
+                associated_event_count += 1
+        elif kind in SESSION_END_EVENT_TYPES:
             current = active_by_equipment.get(equipment)
             if current is None:
-                unassigned.append({"reason": "computed_event_without_open_habilitation", "event": event})
+                unassigned.append({"reason": "session_termination_without_open_habilitation", "event": event})
             else:
-                current["computed_event"] = event
-                finish(equipment, "computed", event)
-        elif kind in {"suspensao", "interrupcao", "falha"}:
+                current["session_end_event"] = event
+                finish(equipment, "completed", event)
+                associated_event_count += 1
+        elif kind in {"suspensao", "interrupcao", "falha", "inicializacao"}:
             current = active_by_equipment.get(equipment)
             if current is None:
                 unassigned.append({"reason": "state_event_without_open_habilitation", "event": event})
             else:
                 current["state_events"].append(event)
+                associated_event_count += 1
         elif kind in {"desligamento", "reinicializacao"}:
             current = active_by_equipment.get(equipment)
             if current is None:
                 unassigned.append({"reason": "lifecycle_event_without_open_habilitation", "event": event})
             else:
                 current["state_events"].append(event)
+                associated_event_count += 1
         else:
             unassigned.append({"reason": "unrecognized_event_without_session_semantics", "event": event})
 
@@ -253,11 +312,24 @@ def reconstruct_voting_sessions(events: list[dict]) -> dict:
         item.update(classify_unassigned_event(item))
     sessions.sort(key=lambda item: (item["equipment_identifier"], item["session_number"]))
     unassigned_counts = Counter(item["classification"] for item in unassigned)
+    relevant_unassigned_count = sum(item["reconciliation_relevant"] for item in unassigned)
+    normalized_event_count = len(events)
+    unassigned_event_count = len(unassigned)
     return {"sessions": sessions, "unassigned_events": unassigned,
-            "unassigned_event_count": len(unassigned),
+            "unassigned_event_count": unassigned_event_count,
             "unassigned_event_classification_counts": dict(sorted(unassigned_counts.items())),
-            "reconciliation_relevant_unassigned_event_count": sum(item["reconciliation_relevant"] for item in unassigned),
-            "semantics": "Only an explicit voto_computado event completes a session. Explicit lifecycle events classify interrupted sessions; an unassigned follow-up habilitation is recorded as a possible, indeterminate resumption without merging sessions."}
+            "reconciliation_relevant_unassigned_event_count": relevant_unassigned_count,
+            "event_accounting": {
+                "normalized_event_count": normalized_event_count,
+                "associated_event_count": associated_event_count,
+                "unassigned_event_count": unassigned_event_count,
+                "blocking_unassigned_event_count": relevant_unassigned_count,
+                "nonblocking_unassigned_event_count": unassigned_event_count - relevant_unassigned_count,
+                "partition_matches_normalized_events": (associated_event_count + unassigned_event_count
+                    == normalized_event_count),
+                "counting_unit": "deduplicated normalized event records passed to session reconstruction",
+            },
+            "semantics": "Each explicit cargo confirmation is counted as a computed vote for that cargo. The event 'O voto do eleitor foi computado' marks the end of the voting session, not an additional cargo vote. Explicit lifecycle events classify interrupted sessions; an unassigned follow-up habilitation is recorded as a possible, indeterminate resumption without merging sessions."}
 
 
 def summarize_events_by_date(events: list[dict]) -> dict:
@@ -281,7 +353,7 @@ def summarize_events_by_date(events: list[dict]) -> dict:
         summary[event_date] = {
             "event_counts": dict(sorted(counts.items())),
             "last_habilitacao_raw": last_of("habilitacao"),
-            "last_voto_computado_raw": last_of("voto_computado"),
+            "last_fim_sessao_votacao_raw": last_of("fim_sessao_votacao"),
             "last_comando_encerramento_raw": last_of("comando_encerramento"),
             "last_inicio_encerramento_raw": last_of("inicio_encerramento"),
             "last_conclusao_encerramento_raw": last_of("conclusao_encerramento"),
@@ -300,21 +372,25 @@ def presidential_only_session_metrics(sessions: list[dict], event_date: str,
                                      unassigned_events: list[dict] | None = None,
                                      event_date_present: bool = True,
                                      habilitation_event_count: int | None = None) -> dict:
-    computed = [session for session in sessions if session.get("computed")
-                and (session.get("computed_event") or {}).get("event_date") == event_date]
     election_day_sessions = [session for session in sessions
                              if session.get("habilitation_event", {}).get("event_date") == event_date]
     incomplete_session_count = sum(session.get("status") == "incompleta_indeterminada"
                                    for session in election_day_sessions)
-    count = 0
+    presidential_only_session_count = 0
+    presidential_only_confirmation_count = 0
     ambiguous = 0
-    for session in computed:
-        cargos = {event.get("cargo") for event in session.get("confirmation_events", [])}
-        if "presidente" in cargos and "governador" not in cargos:
+    for session in election_day_sessions:
+        confirmations = [event for event in session.get("confirmation_events", [])
+                         if event.get("event_date") == event_date]
+        cargos = {event.get("cargo") for event in confirmations}
+        presidential_confirmations = [event for event in confirmations if event.get("cargo") == "presidente"]
+        if presidential_confirmations and cargos == {"presidente"}:
+            presidential_only_session_count += 1
+            presidential_only_confirmation_count += len(presidential_confirmations)
             if session.get("possible_resumption"):
                 ambiguous += 1
-            else:
-                count += 1
+    completed_sessions = [session for session in sessions
+        if (session.get("session_end_event") or {}).get("event_date") == event_date]
     unassigned_for_date = [item for item in (unassigned_events or [])
                            if item.get("event", {}).get("event_date") == event_date]
     classified_unassigned = [item if "reconciliation_relevant" in item else
@@ -325,8 +401,11 @@ def presidential_only_session_metrics(sessions: list[dict], event_date: str,
         if session.get("status") in INTERRUPTED_SESSION_STATUSES)
     session_coverage_matches = (habilitation_event_count is None
                                 or habilitation_event_count == len(election_day_sessions))
-    return {"count": count, "ambiguous_session_count": ambiguous,
-            "computed_session_count": len(computed), "incomplete_session_count": incomplete_session_count,
+    return {"count": presidential_only_confirmation_count,
+            "presidential_only_confirmation_count": presidential_only_confirmation_count,
+            "presidential_only_session_count": presidential_only_session_count,
+            "ambiguous_session_count": ambiguous,
+            "completed_session_count": len(completed_sessions), "incomplete_session_count": incomplete_session_count,
             "unassigned_event_count": len(unassigned_for_date),
             "unassigned_operational_event_count": len(classified_unassigned) - len(relevant_unassigned),
             "reconciliation_relevant_unassigned_event_count": len(relevant_unassigned),
@@ -338,9 +417,9 @@ def presidential_only_session_metrics(sessions: list[dict], event_date: str,
             "possible_resumption_session_count": sum(bool(session.get("possible_resumption"))
                 for session in election_day_sessions),
             "event_date_present": event_date_present,
-            "status": "complete" if event_date_present and session_coverage_matches and not ambiguous
-                and not incomplete_session_count and not relevant_unassigned else "incomplete",
-            "semantics": "A counted session has a presidential confirmation and explicit vote-computed event, no governor confirmation, and no indeterminate resumption link to a prior interrupted session. Explicitly classified operational interruptions are reported separately and do not by themselves invalidate unrelated computed sessions. This count does not identify electors or link sessions to TTE records."}
+            "status": "complete" if event_date_present and session_coverage_matches
+                and not relevant_unassigned else "incomplete",
+            "semantics": "Each presidential confirmation is counted as a computed presidential vote. The count is restricted to reconstructed sessions with presidential confirmations and no confirmation for another cargo; session-end markers, interruptions, and possible-resumption annotations are reported separately and do not erase confirmed votes. No elector identity or TTE-record link is inferred."}
 
 
 def reconcile_log_metrics(events: list[dict], sessions: list[dict], bu: dict,
@@ -349,14 +428,14 @@ def reconcile_log_metrics(events: list[dict], sessions: list[dict], bu: dict,
     day_events = [event for event in events if event.get("event_date") == bu_date]
     date_present = any(event.get("event_date") == bu_date for event in events)
     event_counts = Counter(event["event_type"] for event in day_events)
-    computed_sessions = [session for session in sessions
-                         if (session.get("computed_event") or {}).get("event_date") == bu_date]
+    completed_sessions = [session for session in sessions
+                         if (session.get("session_end_event") or {}).get("event_date") == bu_date]
     exclusive_presidential = presidential_only_session_metrics(sessions, bu_date, unassigned_events, date_present,
         event_counts.get("habilitacao", 0))
-    computation_count = event_counts.get("voto_computado", 0)
+    session_end_count = event_counts.get("fim_sessao_votacao", 0)
     attendance = bu.get("qtd_eleitores_compareceram")
-    computed_status = ("inconclusive" if not date_present or computation_count != len(computed_sessions) else
-                       "matched" if computation_count == attendance else "divergence")
+    session_end_status = ("inconclusive" if not date_present or session_end_count != len(completed_sessions) else
+                          "matched" if session_end_count == attendance else "divergence")
 
     rdv_by_cargo = {}
     rdv_bu_by_cargo = {}
@@ -370,64 +449,69 @@ def reconcile_log_metrics(events: list[dict], sessions: list[dict], bu: dict,
                 rdv_by_cargo[key] = cargo.get("record_count")
 
     cargo_rows = []
-    confirmations_by_kind = {"presidente": "presidente", "governador": "governador"}
+    confirmations_by_kind = {
+        kind.removeprefix("voto_confirmado_"): count for kind, count in event_counts.items()
+        if _is_cargo_confirmation(kind)
+    }
+    unknown_blockers = sum(item.get("classification") == "potentially_relevant_unknown"
+        and item.get("event", {}).get("event_date") == bu_date for item in (unassigned_events or []))
     for election in bu.get("elections", []):
         for result in election.get("results", []):
             for cargo in result.get("cargos", []):
                 code = cargo.get("cargo")
                 if isinstance(code, int):
-                    cargo_name = {1: "presidente", 3: "governador"}.get(code)
+                    cargo_name = BU_CARGO_LABELS.get(code)
                     cargo_kind = "cargoConstitucional"
                 else:
-                    cargo_name = str(code).casefold()
+                    cargo_name = _cargo_slug(str(code))
                     cargo_kind = cargo.get("cargo_kind")
-                eligible_sessions = [session for session in computed_sessions
-                    if any(item.get("cargo") == cargo_name for item in session.get("confirmation_events", []))]
-                confirmation_count = sum(sum(item.get("cargo") == cargo_name
-                    for item in session.get("confirmation_events", [])) for session in eligible_sessions)
+                confirmation_count = event_counts.get(f"voto_confirmado_{cargo_name}", 0) if cargo_name else None
                 rdv_count = rdv_by_cargo.get((str(election.get("id_eleicao")), cargo_kind, str(code)))
                 bu_total = cargo.get("qtd_votos_bu")
                 rdv_bu = rdv_bu_by_cargo.get((str(election.get("id_eleicao")), cargo_kind, str(code)))
+                confirmations_by_kind[cargo_name or str(code)] = confirmation_count
+                available_totals = [value for value in (bu_total, rdv_count) if value is not None]
+                cargo_status = ("not_available" if confirmation_count is None or not available_totals else
+                    "inconclusive" if unknown_blockers else
+                    "divergence" if any(confirmation_count != value for value in available_totals) else "matched")
                 cargo_rows.append({
                     "election_id": election.get("id_eleicao"), "cargo": cargo_name or code,
-                    "log_confirmation_events": event_counts.get(f"voto_confirmado_{cargo_name}", 0) if cargo_name else None,
-                    "log_confirmations_in_computed_sessions": confirmation_count if cargo_name else None,
-                    "computed_sessions_with_cargo_confirmation": len(eligible_sessions) if cargo_name else None,
+                    "log_computed_vote_confirmations": confirmation_count,
                     "bu_vote_total": bu_total, "rdv_record_count": rdv_count,
-                    "confirmation_count_minus_bu": confirmation_count - bu_total if cargo_name and bu_total is not None else None,
-                    "confirmation_count_minus_rdv": confirmation_count - rdv_count if cargo_name and rdv_count is not None else None,
-                    "computed_sessions_minus_bu_cargo_total": len(computed_sessions) - bu_total if bu_total is not None else None,
-                    "computed_sessions_minus_rdv_cargo_count": len(computed_sessions) - rdv_count if rdv_count is not None else None,
+                    "confirmation_count_minus_bu": confirmation_count - bu_total if confirmation_count is not None and bu_total is not None else None,
+                    "confirmation_count_minus_rdv": confirmation_count - rdv_count if confirmation_count is not None and rdv_count is not None else None,
                     "rdv_bu_reconciliation_status": rdv_bu.get("status") if rdv_bu else "not_available",
                     "rdv_minus_bu": rdv_bu.get("divergence_rdv_minus_bu") if rdv_bu else None,
-                    "comparison_status": "inconclusive",
-                    "reason": "Cargo confirmations and session-wide computation events are not per-cargo definitive totals; numeric differences are exposed for review but marked inconclusive. BU-to-RDV cargo reconciliation is reported separately.",
+                    "comparison_status": cargo_status,
+                    "reason": ("Unclassified potentially relevant events prevent a complete cargo comparison." if cargo_status == "inconclusive" else
+                        "No comparable BU/RDV cargo total is available." if cargo_status == "not_available" else
+                        "Log cargo confirmations are compared directly because each confirmation represents a computed vote; the session-end marker is counted separately."),
                 })
     rdv_statuses = [comparison.get("status") for comparison in rdv_bu_by_cargo.values()]
-    overall_status = ("divergence" if computed_status == "divergence" or "divergence" in rdv_statuses else
-                      "inconclusive" if computed_status == "inconclusive" else
+    cargo_statuses = [row["comparison_status"] for row in cargo_rows]
+    overall_status = ("divergence" if session_end_status == "divergence" or "divergence" in rdv_statuses
+                          or "divergence" in cargo_statuses else
+                      "inconclusive" if session_end_status == "inconclusive" or "inconclusive" in cargo_statuses
+                          or exclusive_presidential.get("status") != "complete" else
                       "partial" if ("partial" in rdv_statuses or "no_matching_bu_cargo" in rdv_statuses
                                      or (cargo_rows and not rdv_statuses)) else "matched")
     return {
         "status": overall_status,
-        "computed_votes_vs_bu_attendance_status": computed_status,
+        "session_end_vs_bu_attendance_status": session_end_status,
         "event_date": bu_date,
         "event_date_present": date_present,
         "by_metric": {
             "habilitacoes": {"log_event_count": event_counts.get("habilitacao", 0),
                              "bu_attendance": attendance, "comparison_status": "not_compared",
                              "reason": "Habilitation is not equivalent to a computed vote or attendance."},
-            "votos_computados_vs_bu_comparecimento": {"log_event_count": computation_count,
-                "reconstructed_computed_sessions": len(computed_sessions), "bu_attendance": attendance,
-                "difference_log_minus_bu": computation_count - attendance if date_present else None,
-                "status": computed_status, "event_date_present": date_present,
+            "fim_de_sessao_vs_bu_comparecimento": {"log_session_end_count": session_end_count,
+                "reconstructed_completed_session_count": len(completed_sessions), "bu_attendance": attendance,
+                "difference_log_minus_bu": session_end_count - attendance if date_present else None,
+                "status": session_end_status, "event_date_present": date_present,
                 "reason": ("No timestamped log events were found on the BU election date." if not date_present else
-                           "Some vote-computed events could not be assigned to reconstructed habilitation sessions." if computation_count != len(computed_sessions) else None)},
-            "confirmacoes_por_cargo": {
-                cargo: event_counts.get(f"voto_confirmado_{cargo}", 0)
-                for cargo in confirmations_by_kind
-            },
-            "sessoes_computadas_exclusivamente_presidente": exclusive_presidential,
+                           "Some session-end events could not be assigned to reconstructed habilitation sessions." if session_end_count != len(completed_sessions) else None)},
+            "votos_computados_confirmados_por_cargo": confirmations_by_kind,
+            "votos_confirmados_exclusivamente_presidente": exclusive_presidential,
             "suspensoes": event_counts.get("suspensao", 0),
             "interrupcoes": event_counts.get("interrupcao", 0),
             "falhas": event_counts.get("falha", 0),
@@ -435,7 +519,7 @@ def reconcile_log_metrics(events: list[dict], sessions: list[dict], bu: dict,
         "by_cargo": cargo_rows,
         "rdv_bu_by_cargo": [comparison for rdv in rdvs
                              for comparison in rdv.get("reconciliation_with_bu", {}).get("by_cargo", [])],
-        "limitations": "BU/RDV cargo reconciliation remains independent; no individual RDV record is linked to a session or log event.",
+        "limitations": "Aggregate log/BU/RDV counts do not link individual vote records to electors or sessions.",
     }
 
 
@@ -604,7 +688,7 @@ def analyze(log_path: Path, bu_path: Path, collection_path: Path, cuts: list[str
             "sum": bu["attendance_detail_sum"], "bu_attendance": bu["qtd_eleitores_compareceram"],
             "difference": bu["attendance_detail_sum"] - bu["qtd_eleitores_compareceram"], "status": "divergence"}
     return {
-        "report_schema_version": 4,
+        "report_schema_version": 5,
         "section_key": collection["section_key"],
         "acquisition_id": collection.get("acquired_at_utc"),
         "source_files": {"manifest_sha256": collection.get("manifest_sha256"),
@@ -628,7 +712,7 @@ def analyze(log_path: Path, bu_path: Path, collection_path: Path, cuts: list[str
             "bu_asn1": "decoded",
             "bu_attendance_detail_sum_matches": detail_sum_matches,
             "bu_reconciliation": {**reconciliation, "comparison_semantics":
-                "Only explicit vote-computed events are compared to BU attendance. Enablements are reported separately; cargo confirmations are not treated as definitive cargo vote totals."},
+                "Cargo confirmations are counted directly as computed votes by cargo. 'O voto do eleitor foi computado' is treated as a session-end marker and compared to BU attendance separately. Enablements are reported separately."},
         },
         "clock_cuts_hhmm_raw": cuts,
         "event_semantics": EVENTS,
@@ -723,6 +807,12 @@ def process_log_file(path: Path, metadata: dict, section: str, cuts: list[str]) 
 
     substitution_matches = 0
     parsed_streams: dict[str, str] = {}
+    raw_record_count = 0
+    parseable_record_count = 0
+    malformed_record_count = 0
+    unclassified_record_count = 0
+    recognized_event_candidate_count = 0
+    invalid_event_timestamp_count = 0
     has_any_logd = any("text_data" in source for source in sources.values())
     for source_hash, source in sources.items():
         text_data = source.get("text_data")
@@ -745,25 +835,41 @@ def process_log_file(path: Path, metadata: dict, section: str, cuts: list[str]) 
             source["duplicate_of_logd_sha256"] = stream_hash
             continue
         parsed_streams[stream_hash] = source_hash
+        source["raw_record_count"] = 0
+        source["parseable_record_count"] = 0
+        source["malformed_record_count"] = 0
+        source["unclassified_record_count"] = 0
+        source["invalid_event_timestamp_count"] = 0
         for line_number, raw_line in enumerate(text_data.splitlines(), 1):
+            raw_record_count += 1
+            source["raw_record_count"] += 1
             fields = raw_line.split("\t")
             if len(fields) < 5:
+                malformed_record_count += 1
+                source["malformed_record_count"] += 1
                 diagnostics.append(diagnostic(code="LOG_LINE_MALFORMED", stage="parsing", operation="parse_log_record",
                     error_type="parsing", cause=f"Expected at least five tab-separated fields, found {len(fields)}.",
                     recoverability="permanent", section=section, file_type="log", file_name=path.name, file_path=str(path),
                     position={"line": line_number}, detected_format="ZIP/logd.dat",
                     context={"field_count": len(fields), "source_path": source["source_aliases"][0]["source_path"]}))
                 continue
+            parseable_record_count += 1
+            source["parseable_record_count"] += 1
             message = fields[4]
             message_lower = message.lower()
             if any(term in message_lower for term in ("contingência", "substituição", "urna substituta", "troca de urna", "recuperação dos dados")):
                 substitution_matches += 1
             event_type = _event_type(message)
             if event_type is None:
+                unclassified_record_count += 1
+                source["unclassified_record_count"] += 1
                 continue
+            recognized_event_candidate_count += 1
             try:
                 timestamp = datetime.strptime(fields[0], "%d/%m/%Y %H:%M:%S")
             except ValueError as error:
+                invalid_event_timestamp_count += 1
+                source["invalid_event_timestamp_count"] += 1
                 diagnostics.append(diagnostic(code="LOG_EVENT_TIMESTAMP_INVALID", stage="parsing", operation="parse_event_timestamp",
                     error_type="parsing", cause=str(error), recoverability="permanent", section=section,
                     file_type="log", file_name=path.name, file_path=str(path), exception=error,
@@ -784,6 +890,14 @@ def process_log_file(path: Path, metadata: dict, section: str, cuts: list[str]) 
                 "event_time": hhmm, "at_or_after_clock_cuts": [cut for cut in cuts if hhmm >= cut],
                 "event_timezone": "unknown", "event_timestamp_utc": None,
                 "event_timestamp_brt": None, "parser_status": "allowlist_match"}
+            cargo_label = _cargo_confirmation_label(message)
+            if cargo_label is not None:
+                event["cargo"] = _cargo_slug(cargo_label)
+                event["cargo_label"] = cargo_label
+            cargo_label = _cargo_confirmation_label(message)
+            if cargo_label is not None:
+                event["cargo"] = _cargo_slug(cargo_label)
+                event["cargo_label"] = cargo_label
             if event_type == "evento_desconhecido_relevante":
                 event["message_raw"] = message
                 event["parser_status"] = "potentially_relevant_unclassified"
@@ -791,7 +905,7 @@ def process_log_file(path: Path, metadata: dict, section: str, cuts: list[str]) 
             counts[event_type] += 1
             event_date = timestamp.strftime("%Y-%m-%d")
             counts_by_date[event_date][event_type] += 1
-            if event_type in {"habilitacao", "voto_computado", "voto_confirmado_governador", "voto_confirmado_presidente"}:
+            if event_type == "habilitacao" or event_type == "fim_sessao_votacao" or _is_cargo_confirmation(event_type):
                 for cut in cuts:
                     if hhmm >= cut:
                         key = f"{event_type}_a_partir_de_{cut.replace(':', 'h')}"
@@ -809,8 +923,28 @@ def process_log_file(path: Path, metadata: dict, section: str, cuts: list[str]) 
                           "contains_logd_dat": "text_data" in source,
                           "logd_sha256": source.get("logd_sha256"),
                           "duplicate_of_logd_sha256": source.get("duplicate_of_logd_sha256"),
+                          "raw_record_count": source.get("raw_record_count", 0),
+                          "parseable_record_count": source.get("parseable_record_count", 0),
+                          "malformed_record_count": source.get("malformed_record_count", 0),
+                          "unclassified_record_count": source.get("unclassified_record_count", 0),
+                          "invalid_event_timestamp_count": source.get("invalid_event_timestamp_count", 0),
                           "event_count": sum(event["source_file_sha256"] == source_hash for event in events)}
                          for source_hash, source in sources.items()],
+        "log_record_accounting": {
+            "unique_log_stream_count": len(parsed_streams),
+            "raw_record_count": raw_record_count,
+            "parseable_record_count": parseable_record_count,
+            "malformed_record_count": malformed_record_count,
+            "unclassified_record_count": unclassified_record_count,
+            "recognized_event_candidate_count": recognized_event_candidate_count,
+            "invalid_event_timestamp_count": invalid_event_timestamp_count,
+            "normalized_event_count": len(events),
+            "parseable_records_without_normalized_event_count": parseable_record_count - len(events),
+            "record_partition_matches_parseable_records": (unclassified_record_count
+                + invalid_event_timestamp_count + len(events) == parseable_record_count),
+            "record_partition_matches_raw_records": parseable_record_count + malformed_record_count == raw_record_count,
+            "counting_unit": "records from unique decompressed logd.dat streams; duplicate streams are excluded",
+        },
         "nested_archive_count": max(0, len(sources) - 1), "substitution_keyword_matches": substitution_matches,
         "sha256": file_hash, "size_bytes": path.stat().st_size, "detected_format": "ZIP/JEZ",
         "version": None, "urn_model": None}
@@ -1053,6 +1187,24 @@ def analyze_collection(collection_path: Path, cuts: list[str], bu_schema_path: P
                             target["aliases"].append(alias)
             legacy_report["log_sources"] = list(sources_by_hash.values())
             session_reconstruction = reconstruct_voting_sessions(all_events)
+            unique_streams = {}
+            for source in sources_by_hash.values():
+                stream_hash = source.get("logd_sha256")
+                if stream_hash and not source.get("duplicate_of_logd_sha256"):
+                    unique_streams.setdefault(stream_hash, source)
+            legacy_report["log_record_accounting"] = {
+                "unique_log_stream_count": len(unique_streams),
+                "raw_record_count": sum(source.get("raw_record_count", 0) for source in unique_streams.values()),
+                "parseable_record_count": sum(source.get("parseable_record_count", 0) for source in unique_streams.values()),
+                "malformed_record_count": sum(source.get("malformed_record_count", 0) for source in unique_streams.values()),
+                "normalized_event_count": len(all_events),
+                "unclassified_record_count": sum(source.get("unclassified_record_count", 0)
+                    for source in unique_streams.values()),
+                "invalid_event_timestamp_count": sum(source.get("invalid_event_timestamp_count", 0)
+                    for source in unique_streams.values()),
+                "counting_unit": "records from unique decompressed logd.dat streams; duplicate streams and source aliases are excluded",
+            }
+            legacy_report["voting_sessions"]["event_accounting"] = session_reconstruction["event_accounting"]
             bu_data = next(item["data"] for item in bu_results if item.get("data"))
             combined_reconciliation = reconcile_log_metrics(all_events, session_reconstruction["sessions"],
                 bu_data, rdv_results, bu_data["election_date"], session_reconstruction["unassigned_events"])
@@ -1063,7 +1215,7 @@ def analyze_collection(collection_path: Path, cuts: list[str], bu_schema_path: P
                     "difference": bu_data["attendance_detail_sum"] - bu_data["qtd_eleitores_compareceram"],
                     "status": "divergence"}
             legacy_report["validation"]["bu_reconciliation"] = {**combined_reconciliation,
-                "comparison_semantics": "Only explicit vote-computed events are compared to BU attendance. Enablements are reported separately; cargo confirmations are not treated as definitive cargo vote totals."}
+                "comparison_semantics": "Cargo confirmations are counted directly as computed votes by cargo. 'O voto do eleitor foi computado' is treated as a session-end marker and compared to BU attendance separately. Enablements are reported separately."}
             legacy_report["voting_sessions"] = session_reconstruction
             legacy_report["relevant_events"] = all_events
             legacy_report["event_count_total"] = len(all_events)
@@ -1116,7 +1268,7 @@ def analyze_collection(collection_path: Path, cuts: list[str], bu_schema_path: P
         decoded_bu = next((item.get("data") for item in bu_results if item.get("data")), None)
         round_number = (decoded_bu or {}).get("turno", collection.get("turno"))
         recon = (legacy_report or {}).get("validation", {}).get("bu_reconciliation", {})
-        log_metric = recon.get("by_metric", {}).get("sessoes_computadas_exclusivamente_presidente")
+        log_metric = recon.get("by_metric", {}).get("votos_confirmados_exclusivamente_presidente")
         event_date = (decoded_bu or {}).get("election_date")
         transfer_reconciliation["turno"] = round_number
         if not isinstance(section, str):

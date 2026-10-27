@@ -12,12 +12,12 @@ Antes de implementar o leitor, o cabeçalho do CSV e o `leiame.pdf` no ZIP foram
 
 O dicionário define `Federal` como transferência para outro estado ou país. Para voto em trânsito, define voto apenas para Presidente quando a pessoa está fora da UF de domicílio. A comparação usa todos os registros de abrangência `Federal` como quantidade de referência da seção, mantendo `TP_TTE` separado no detalhamento; isso é uma comparação agregada de compatibilidade, não prova que cada sessão ou cada modalidade federal corresponda a voto exclusivamente presidencial.
 
-Na análise, a métrica do log exige sessão reconstruída com habilitação, confirmação presidencial e evento explícito posterior de voto computado, sem confirmação de governador e sem uma possível retomada indeterminada de sessão anterior interrompida no mesmo fluxo e na mesma data. Eventos operacionais de suspensão/falha permanecem classificados e não invalidam automaticamente outra sessão. Sessões isoladas não são ligadas a pessoas ou linhas da base. Os status são:
+Na análise, a métrica conta cada confirmação explícita presidencial em sessões sem confirmação de outro cargo. Pela regra de interpretação configurada na aplicação, a confirmação é a unidade de voto computado; `O voto do eleitor foi computado` encerra a sessão e não acrescenta outro voto. Fim de sessão é verificado separadamente frente ao comparecimento do BU. Sessões suspensas, interrompidas ou com possível retomada mantêm suas confirmações; o vínculo entre sessões permanece indeterminado. Sessões individuais não são ligadas a pessoas ou linhas da base. Os status são:
 
 - `confirmado`: contagem do log igual à quantidade federal da seção; confirmação somente no nível agregado.
 - `compatível`: contagem do log menor que a quantidade federal; diferenças podem refletir eleitores que não votaram.
 - `divergente`: contagem do log maior que a referência federal observada; o resultado não identifica a causa.
-- `dados_insuficientes`: referência inválida/incompleta, turno fora do escopo, ou métrica de log ausente/ambígua.
+- `dados_insuficientes`: referência inválida/incompleta, turno fora do escopo, métrica de confirmações incompleta, ou confirmação relevante sem associação de sessão. Possíveis retomadas continuam marcadas como indeterminadas, mas não anulam a contagem das confirmações registradas.
 
 Para cada `acquisition.json` passado ao extrator, é produzido na pasta daquele turno um recorte `transferencia-temporaria-elegiveis.csv`, com as linhas destinadas à seção/turno coletados e todas as colunas originais do CSV. Seções fora da aquisição não recebem recorte. O JSON de validação registra também caminho, hash e contagens desse recorte. A métrica de referência presidencial soma todas as modalidades com abrangência `Federal`; os tipos permanecem discriminados, sem confundir o tipo específico `Voto em Trânsito` com o universo de eleitores temporariamente transferidos aptos ao voto presidencial.
 

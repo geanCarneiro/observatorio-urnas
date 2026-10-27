@@ -381,27 +381,31 @@ def write_section_excerpts(targets: list[dict], directory: Path = BASE_DIR,
                 temporary_path.unlink()
 
 
-def presidential_only_session_count(session_reconstruction: dict, event_date: str) -> dict:
-    sessions = session_reconstruction.get("sessions", [])
-    relevant = [session for session in sessions
-                if session.get("computed") and session.get("computed_event", {}).get("event_date") == event_date]
-    count = 0
-    ambiguous = 0
-    for session in relevant:
-        cargos = {event.get("cargo") for event in session.get("confirmation_events", [])}
-        if "presidente" in cargos and "governador" not in cargos:
-            if session.get("possible_resumption"):
-                ambiguous += 1
-            else:
-                count += 1
-    unassigned_events = session_reconstruction.get("unassigned_events", [])
-    relevant_unassigned_count = session_reconstruction.get("reconciliation_relevant_unassigned_event_count",
-        sum(bool(item.get("reconciliation_relevant", True)) for item in unassigned_events))
-    return {"count": count, "ambiguous_session_count": ambiguous,
-            "computed_session_count": len(relevant),
-            "unassigned_event_count": len(unassigned_events),
-            "reconciliation_relevant_unassigned_event_count": relevant_unassigned_count,
-            "semantics": "A counted item has a presidential confirmation and a later explicit session-wide vote-computed event, no governor confirmation, and no indeterminate resumption link. Classified operational interruptions are reported separately. This does not identify the elector or link a session to an individual TTE record."}
+def presidential_only_confirmed_vote_count(session_reconstruction: dict, event_date: str) -> dict:
+    sessions = [session for session in session_reconstruction.get("sessions", [])
+                if session.get("habilitation_event", {}).get("event_date") == event_date]
+    pres_only = []
+    for session in sessions:
+        confirmations = [event for event in session.get("confirmation_events", [])
+                         if event.get("event_date") == event_date]
+        cargos = {event.get("cargo") for event in confirmations}
+        pres_confirmations = [event for event in confirmations if event.get("cargo") == "presidente"]
+        if pres_confirmations and cargos == {"presidente"}:
+            pres_only.append((session, len(pres_confirmations)))
+    unassigned = [item for item in session_reconstruction.get("unassigned_events", [])
+                  if item.get("event", {}).get("event_date") == event_date]
+    blocking = sum(bool(item.get("reconciliation_relevant", True)) for item in unassigned)
+    count = sum(item[1] for item in pres_only)
+    return {"count": count, "presidential_only_confirmation_count": count,
+            "presidential_only_session_count": len(pres_only),
+            "ambiguous_session_count": sum(bool(session.get("possible_resumption")) for session, _ in pres_only),
+            "completed_session_count": sum((session.get("session_end_event") or {}).get("event_date") == event_date
+                                            for session in sessions),
+            "incomplete_session_count": sum(session.get("status") == "incompleta_indeterminada" for session in sessions),
+            "unassigned_event_count": len(unassigned),
+            "reconciliation_relevant_unassigned_event_count": blocking,
+            "status": "complete" if blocking == 0 else "incomplete",
+            "semantics": "Each explicit presidential cargo confirmation is counted as a computed presidential vote when its reconstructed session has no confirmation for another cargo. Session-end markers and possible-resumption signals are reported separately. No elector or individual TTE record is identified."}
 
 
 def reconcile_section(index: TransferReferenceIndex, section_key: str, turn: int | None,
@@ -417,15 +421,13 @@ def reconcile_section(index: TransferReferenceIndex, section_key: str, turn: int
     relevant_unassigned = (log_metric.get("reconciliation_relevant_unassigned_event_count",
         log_metric.get("unassigned_event_count", 0)) if isinstance(log_metric, dict) else None)
     metric_complete = (isinstance(log_metric, dict) and log_metric.get("status") == "complete"
-                       and log_metric.get("ambiguous_session_count", 0) == 0
-                       and log_metric.get("incomplete_session_count", 0) == 0
                        and relevant_unassigned == 0)
     if index.status != "complete":
         status, reason = "dados_insuficientes", "The reference CSV was only partially parsed."
     elif turn != 2:
         status, reason = "dados_insuficientes", "This comparison is scoped to the second election round."
     elif not metric_complete or not log_count_valid:
-        status, reason = "dados_insuficientes", "No complete, unambiguous log metric for computed presidential-only sessions is available."
+        status, reason = "dados_insuficientes", "No complete log metric for confirmed presidential votes is available."
     elif log_count == expected:
         status, reason = "confirmado", "The aggregate log count equals the official destination-section count for Federal temporary transfers. This confirms count compatibility only, not session-to-elector identity."
     elif log_count < expected:
@@ -436,7 +438,7 @@ def reconcile_section(index: TransferReferenceIndex, section_key: str, turn: int
     return {
         "section_key": section_key, "uf": uf.upper(), "municipio": municipality.zfill(5),
         "zona": zone.zfill(4), "secao": section.zfill(4), "turno": turn,
-        "status": status, "reason": reason, "log_presidential_only_computed_sessions": log_count,
+        "status": status, "reason": reason, "log_presidential_only_confirmed_votes": log_count,
         "log_metric_detail": log_metric, "reference_federal_transfer_count": expected,
         "reference_transfer_type_scope_breakdown": breakdown,
         "reference_rows_present": bool(breakdown), "event_date": event_date,
@@ -448,14 +450,14 @@ def reconcile_section(index: TransferReferenceIndex, section_key: str, turn: int
 
 def write_reconciliation(rows: list[dict], json_path: Path, csv_path: Path,
                          source_note: str = "analysis_report") -> None:
-    payload = {"report_type": "tse_temporary_transfer_section_reconciliation", "schema_version": 1,
+    payload = {"report_type": "tse_temporary_transfer_section_reconciliation", "schema_version": 2,
                "generated_at_utc": datetime.now(timezone.utc).isoformat(), "log_metric_source": source_note,
                "scope": {"election_year": 2026, "turn": 2}, "row_count": len(rows),
                "status_counts": dict(Counter(row.get("status") for row in rows)), "sections": rows}
     _atomic_write(json_path, (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode())
     fields = ["section_key", "uf", "municipio", "zona", "secao", "turno", "tipo_transferencia",
               "abrangencia", "quantidade_eleitores", "reference_federal_transfer_count",
-              "log_presidential_only_computed_sessions", "difference_log_minus_reference", "status",
+              "log_presidential_only_confirmed_votes", "difference_log_minus_reference", "status",
               "source_zip_sha256", "event_date"]
     with csv_path.open("w", encoding="utf-8-sig", newline="") as output:
         writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore")
@@ -466,14 +468,14 @@ def write_reconciliation(rows: list[dict], json_path: Path, csv_path: Path,
             for detail in breakdown:
                 writer.writerow({**report, **detail,
                     "difference_log_minus_reference": (
-                        report["log_presidential_only_computed_sessions"] - report["reference_federal_transfer_count"]
-                        if report.get("log_presidential_only_computed_sessions") is not None
+                        report["log_presidential_only_confirmed_votes"] - report["reference_federal_transfer_count"]
+                        if report.get("log_presidential_only_confirmed_votes") is not None
                         and report.get("reference_federal_transfer_count") is not None else None),
                     "source_zip_sha256": (report.get("reference") or {}).get("zip_sha256")})
 
 
 def write_validation(rows: list[dict], json_path: Path, directory: Path = BASE_DIR,
-                     source_note: str = "section_analysis_log_sessions") -> None:
+                     source_note: str = "section_analysis_cargo_confirmations") -> None:
     """Write a compact audit record without bundling the reference ZIP itself."""
     identity = reference_identity(directory)
     row_reference = next((row.get("reference") for row in rows if row.get("reference")), None)
@@ -491,11 +493,11 @@ def write_validation(rows: list[dict], json_path: Path, directory: Path = BASE_D
     divergences = []
     for row in rows:
         reference_count = row.get("reference_federal_transfer_count")
-        log_count = row.get("log_presidential_only_computed_sessions")
+        log_count = row.get("log_presidential_only_confirmed_votes")
         difference = log_count - reference_count if isinstance(log_count, int) and isinstance(reference_count, int) else None
         section = {key: row.get(key) for key in (
             "section_key", "uf", "municipio", "zona", "secao", "turno", "status", "reason", "event_date",
-            "log_presidential_only_computed_sessions", "log_metric_detail", "reference_federal_transfer_count",
+            "log_presidential_only_confirmed_votes", "log_metric_detail", "reference_federal_transfer_count",
             "reference_transfer_type_scope_breakdown", "reference_rows_present", "reference_excerpt",
             "individual_session_tte_join_performed")}
         section["difference_log_minus_reference"] = difference
@@ -508,7 +510,7 @@ def write_validation(rows: list[dict], json_path: Path, directory: Path = BASE_D
                                 "reason": row.get("reason")})
     payload = {
         "report_type": "tse_temporary_transfer_validation",
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "source": source_note,
         "reference": {**identity, "base_embedded_in_artifact": False},
@@ -526,7 +528,7 @@ def main() -> int:
     parser.add_argument("--update-reference", action="store_true",
                         help="explicitly query CKAN and preserve a new reference ZIP version")
     parser.add_argument("--reconcile-counts", type=Path,
-                        help="JSON mapping section keys to presidential-only computed-session counts; does not read logs")
+                        help="JSON mapping section keys to presidential-only confirmed-vote counts; does not read logs")
     parser.add_argument("--turn", type=int, default=2)
     parser.add_argument("--output-json", type=Path)
     parser.add_argument("--output-csv", type=Path)

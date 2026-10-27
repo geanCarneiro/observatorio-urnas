@@ -11,7 +11,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from temporary_transfer import (MEMBER_CSV, TransferReferenceIndex, load_reference,
-    reconcile_section, update_reference, write_reconciliation, write_section_excerpts, write_validation)
+    presidential_only_confirmed_vote_count, reconcile_section, update_reference,
+    write_reconciliation, write_section_excerpts, write_validation)
 from analyze_section import presidential_only_session_metrics
 from extract_section_data import extract_collection
 
@@ -81,6 +82,8 @@ class TemporaryTransferTests(unittest.TestCase):
             self.assertEqual(reconcile_section(index, "es/56251/0054/0067", 2, lower)["status"], "compatível")
             higher = {**complete, "count": 14}
             self.assertEqual(reconcile_section(index, "es/56251/0054/0067", 2, higher)["status"], "divergente")
+            blocked = {**complete, "reconciliation_relevant_unassigned_event_count": 1}
+            self.assertEqual(reconcile_section(index, "es/56251/0054/0067", 2, blocked)["status"], "dados_insuficientes")
             self.assertEqual(reconcile_section(index, "es/56251/0054/0067", 2, None)["status"], "dados_insuficientes")
             self.assertFalse(reconcile_section(index, "es/56251/0054/0067", 2, complete)["individual_session_tte_join_performed"])
 
@@ -102,6 +105,7 @@ class TemporaryTransferTests(unittest.TestCase):
             json_path, csv_path = root / "reconciliation.json", root / "reconciliation.csv"
             write_reconciliation([report], json_path, csv_path)
             payload = json.loads(json_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["schema_version"], 2)
             with csv_path.open(encoding="utf-8-sig", newline="") as stream:
                 rows = list(csv.DictReader(stream))
             self.assertEqual(payload["sections"][0]["status"], "confirmado")
@@ -123,7 +127,7 @@ class TemporaryTransferTests(unittest.TestCase):
                               "obtained_at_utc": "2026-10-27T00:00:00Z"}]}))
             result = {"transferencia_temporaria": {
                 "section_key": "es/56251/0054/0067", "turno": 2, "status": "dados_insuficientes",
-                "reason": "reference unavailable", "log_presidential_only_computed_sessions": 13,
+                "reason": "reference unavailable", "log_presidential_only_confirmed_votes": 13,
                 "reference_federal_transfer_count": None, "reference": None}}
             with patch("extract_section_data.analyze_collection", return_value=result), \
                     patch("extract_section_data.write_validation", side_effect=lambda rows, path, source_note:
@@ -132,6 +136,7 @@ class TemporaryTransferTests(unittest.TestCase):
             validation_path = acquisition_dir / "transferencia-temporaria-validation.json"
             self.assertTrue(validation_path.exists())
             validation = json.loads(validation_path.read_text(encoding="utf-8"))
+            self.assertEqual(validation["schema_version"], 2)
             self.assertFalse(validation["reference"]["base_embedded_in_artifact"])
             self.assertEqual(validation["reference"]["zip_sha256"], "f" * 64)
             self.assertFalse(validation["reference"]["available"])
@@ -196,27 +201,32 @@ class TemporaryTransferTests(unittest.TestCase):
             self.assertEqual(Path(original["path"]).read_bytes(), b"zip bytes")
             self.assertTrue(Path(result["path"]).exists())
 
-    def test_explicit_lifecycle_event_does_not_discard_computed_presidential_session(self):
+    def test_confirmed_presidential_votes_survive_lifecycle_and_missing_session_end(self):
         sessions = [
-            {"computed": True, "computed_event": {"event_date": "2026-10-25"},
+            {"completed": True, "session_end_event": {"event_date": "2026-10-25"},
              "habilitation_event": {"event_date": "2026-10-25"},
-             "confirmation_events": [{"cargo": "presidente"}], "state_events": []},
-            {"computed": True, "computed_event": {"event_date": "2026-10-25"},
+             "confirmation_events": [{"cargo": "presidente", "event_date": "2026-10-25"}], "state_events": []},
+            {"completed": True, "session_end_event": {"event_date": "2026-10-25"},
              "habilitation_event": {"event_date": "2026-10-25"},
-             "confirmation_events": [{"cargo": "presidente"}, {"cargo": "governador"}], "state_events": []},
-            {"computed": True, "computed_event": {"event_date": "2026-10-25"},
+             "confirmation_events": [{"cargo": "presidente", "event_date": "2026-10-25"},
+                                     {"cargo": "governador", "event_date": "2026-10-25"}], "state_events": []},
+            {"completed": False, "session_end_event": None,
+             "habilitation_event": {"event_date": "2026-10-25"}, "status": "interrompida_por_falha",
+             "confirmation_events": [{"cargo": "presidente", "event_date": "2026-10-25"}],
+             "state_events": [{"event_type": "falha"}]},
+            {"completed": False, "session_end_event": None,
              "habilitation_event": {"event_date": "2026-10-25"},
-             "confirmation_events": [{"cargo": "presidente"}], "state_events": [{"event_type": "falha"}]},
-            {"computed": False, "computed_event": None,
-             "habilitation_event": {"event_date": "2026-10-25"},
-             "confirmation_events": [{"cargo": "presidente"}], "state_events": [],
+             "confirmation_events": [{"cargo": "presidente", "event_date": "2026-10-25"}], "state_events": [],
              "status": "incompleta_indeterminada"},
         ]
         result = presidential_only_session_metrics(sessions, "2026-10-25")
-        self.assertEqual(result["count"], 2)
+        self.assertEqual(result["count"], 3)
         self.assertEqual(result["ambiguous_session_count"], 0)
-        self.assertEqual(result["computed_session_count"], 3)
-        self.assertEqual(result["status"], "incomplete")
+        self.assertEqual(result["completed_session_count"], 2)
+        self.assertEqual(result["incomplete_session_count"], 1)
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(presidential_only_confirmed_vote_count(
+            {"sessions": sessions, "unassigned_events": []}, "2026-10-25")["count"], 3)
 
 
 if __name__ == "__main__":
