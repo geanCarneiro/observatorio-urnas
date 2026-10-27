@@ -40,13 +40,15 @@ Cada seção fica sob `dados/<uf>/<municipio>/<zona>/<secao>/`. A coleta organiz
 
 ```text
 dados/es/56251/0054/0509/
-├── turno-1/runs/<id-aquisicao>/
+├── turno-1/
 │   ├── acquisition.json
 │   ├── bu/<arquivo-bu>.dat[.json]
 │   └── rdv/<arquivo-rdv>.dat[.json]
-├── turno-2/runs/<id-aquisicao>/...
-└── logs/runs/<id-aquisicao>/<arquivo-log>.jez[.json]
+├── turno-2/...
+└── logs/<arquivo-log>.jez[.json]
 ```
+
+Cada pasta de turno mantém a aquisição mais recente daquele turno. Uma nova coleta no mesmo diretório atualiza arquivos com o mesmo nome oficial; o `acquisition.json` registra a proveniência da versão presente. O Actions publica um artefato imutável por execução.
 
 O workflow **Piloto de coleta de seção** continua disponível para repetir uma única seção.
 

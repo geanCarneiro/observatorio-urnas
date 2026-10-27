@@ -382,8 +382,10 @@ def main() -> int:
                      "observed_turn_from_bu": detected_turn, "pleito_id": pleito_id}))
 
     turn_directory = folder_for_pleito(pleito_id)
-    final_root = section_root / turn_directory / "runs" / acquisition_id
-    log_root = section_root / "logs" / "runs" / acquisition_id
+    # Keep one current acquisition per turn directly in the section tree.
+    # Logs live at section root because a log can cover multiple election days.
+    final_root = section_root / turn_directory
+    log_root = section_root / "logs"
     final_root.mkdir(parents=True, exist_ok=True)
     for item in run["files"]:
         source = root / item["relative_path"]

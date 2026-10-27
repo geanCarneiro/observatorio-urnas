@@ -126,7 +126,9 @@ class DiagnosticPipelineTests(unittest.TestCase):
             log_item = next(item for item in acquisition["files"] if item["type"] == "log")
             raw_log = acquisition_path.parent / log_item["relative_path"]
             self.assertEqual(raw_log.name, "o03221es5625100540509-log.jez")
-            self.assertIn("/logs/runs/", str(raw_log))
+            self.assertEqual(raw_log.parent.name, "logs")
+            self.assertFalse(any(part == "runs" for part in raw_log.parts))
+            self.assertFalse(any(part == "runs" for part in raw_bu.parts))
             log_extraction = json.loads(raw_log.with_name(raw_log.name + ".json").read_text(encoding="utf-8"))
             self.assertEqual(len(log_extraction["events"]), 1)
             self.assertEqual(log_extraction["events"][0]["event_timestamp_raw"], "26/10/2026 17:01:00")
