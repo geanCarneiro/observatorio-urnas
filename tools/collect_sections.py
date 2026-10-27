@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from diagnostics import diagnostic, summarize_diagnostics
+from section_aggregation import is_aggregated
 
 MAX_BATCH_SIZE = 100
 
@@ -24,9 +25,13 @@ def collect_sections(sections: list[dict], output_root: Path, runner=subprocess.
         raise ValueError(f"limit must be between 1 and {MAX_BATCH_SIZE}")
     selected = sections[offset:offset + limit]
     for index, section in enumerate(selected, start=offset):
-        diagnostics_before = len(diagnostics)
         key = "/".join((str(section.get("uf", "")).lower(), str(section.get("municipio", "")),
                         str(section.get("zona", "")), str(section.get("secao", ""))))
+        if is_aggregated(section):
+            results.append({"section": key, "status": "aggregated", "return_code": 0,
+                "acquisition": None, "principal_section_key": section.get("principal_section_key"),
+                "diagnostic_count": 0, "file_states": []})
+            continue
         command = [sys.executable, str(script), "--uf", str(section.get("uf", "")),
                    "--municipio", str(section.get("municipio", "")), "--zona", str(section.get("zona", "")),
                    "--secao", str(section.get("secao", "")), "--data-id", data_id,
@@ -54,10 +59,22 @@ def collect_sections(sections: list[dict], output_root: Path, runner=subprocess.
                     cause="Collector completed without section identity or acquisition metadata path.", recoverability="indeterminate",
                     section=key, file_type="collection_result", file_name=None, file_path=None,
                     context={"return_code": completed.returncode}))
+            states = summary.get("file_states", [])
+            core_states = [state for state in states if state.get("type") in {"bu", "rdv", "log"}]
+            downloaded_count = sum(state.get("status") == "downloaded" for state in core_states)
+            failed_statuses = {"missing", "not_found", "failed", "partial"}
+            has_real_failure = any(state.get("status") in failed_statuses for state in core_states)
+            if completed.returncode != 0 or not core_states or downloaded_count == 0:
+                section_status = "failed"
+            elif has_real_failure:
+                section_status = "partial"
+            else:
+                section_status = "collected"
             results.append({"section": summary.get("section_key", key),
-                "status": "failed" if completed.returncode else "partial" if len(diagnostics) > diagnostics_before else "collected",
+                "status": section_status,
                 "return_code": completed.returncode, "acquisition": summary.get("acquisition"),
-                "diagnostic_count": len(result_diagnostics), "file_states": summary.get("file_states", [])})
+                "downloaded_source_file_count": downloaded_count,
+                "diagnostic_count": len(result_diagnostics), "file_states": states})
         except Exception as error:
             diagnostics.append(diagnostic(code="BATCH_SECTION_INVOCATION_FAILED", stage="batch_collection",
                 operation="invoke_collector", error_type="internal", cause=str(error), recoverability="indeterminate",
@@ -65,7 +82,15 @@ def collect_sections(sections: list[dict], output_root: Path, runner=subprocess.
                 position={"section_index": index}, context={"command": command}))
             results.append({"section": key, "status": "failed", "return_code": None, "acquisition": None,
                 "diagnostic_count": 1, "file_states": []})
-    return {"report_type": "batch_collection", "data_id": data_id,
+    counts = {"registered_sections": len(selected),
+        "aggregated_sections": sum(item["status"] == "aggregated" for item in results),
+        "principal_collectable_sections": sum(section.get("collectable", not is_aggregated(section))
+                                               for section in selected),
+        "effectively_collected_sections": sum(item["status"] in {"collected", "partial"} for item in results),
+        "fully_collected_sections": sum(item["status"] == "collected" for item in results),
+        "partial_sections": sum(item["status"] == "partial" for item in results),
+        "real_failures": sum(item["status"] in {"partial", "failed"} for item in results)}
+    return {"report_type": "batch_collection", "data_id": data_id, "section_counts": counts,
             "section_count": len(results), "sections": results,
             "diagnostics": diagnostics, "diagnostic_summary": summarize_diagnostics(diagnostics)}
 
@@ -102,6 +127,7 @@ def main() -> int:
     else:
         result = collect_sections(sections, args.output, data_id=args.data_id,
                                   offset=args.offset, limit=args.limit)
+    print(json.dumps(result, ensure_ascii=False))
     return 0
 
 

@@ -4,6 +4,8 @@
 
 O catálogo `arquivo-urna/3220/config/{uf}/{uf}-p003220-cs.jws` fornece a hierarquia de municípios, zonas e seções (`abr → mu → zon → sec`). A aplicação o baixa por UF, preserva cada JWS recebido, calcula SHA-256, registra a resposta HTTP e produz um inventário ordenado. O payload do catálogo é decodificado para seleção, mas a assinatura JWS permanece explicitamente não verificada.
 
+Os campos de agregação `nsp` e `nsa` são preservados sem alteração em cada linha do inventário. A aplicação deriva e valida os vínculos nos dois sentidos dentro da UF/município/zona: `nsp` aponta para a seção principal e `nsa` lista as seções agregadas. As inconsistências têm códigos estáveis `SECTION_AGGREGATION_*` em `diagnostics`; os dados originais continuam disponíveis no catálogo JWS preservado e nos campos brutos do JSON. Seções agregadas recebem estado `aggregated` e não são enviadas ao coletor de arquivos. Os relatórios separam cadastradas, agregadas, coletáveis, efetivamente coletadas, falhas reais e não processadas; a falta de manifesto de aquisição, isoladamente, significa `not_processed`, não falha HTTP.
+
 ## Interface planejada
 
 - Cada campo UF, município, zona e seção é um filtro opcional e cumulativo. Campos em branco ampliam a busca; todos em branco consultam as UFs e o exterior.

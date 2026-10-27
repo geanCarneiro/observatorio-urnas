@@ -16,6 +16,7 @@ from urllib.error import HTTPError, URLError
 
 from collect_section import DownloadIncompleteError, decode_unverified_jws, fetch, save_atomic
 from diagnostics import diagnostic
+from section_aggregation import aggregation_counts, link_aggregations
 
 
 BASE_URL = "https://resultados.tse.jus.br/oficial/ele2026/arquivo-urna/{config_id}/config/{uf}/{uf}-p00{config_id}-cs.jws"
@@ -68,6 +69,8 @@ def section_records(payload: dict, requested_uf: str) -> list[dict]:
                     "secao": section["ns"].zfill(4),
                     "catalog_date_raw": section.get("da"),
                     "catalog_time_raw": section.get("ha"),
+                    "nsp": section.get("nsp"),
+                    "nsa": section.get("nsa"),
                 })
     return records
 
@@ -176,10 +179,14 @@ def discover(*, config_id: str, output: Path, uf: str | None = None, municipio: 
                 context={"url": url, "sha256": raw_sha256, "config_id": config_id},
             ))
 
+    records, aggregation_diagnostics = link_aggregations(records)
+    diagnostics.extend(aggregation_diagnostics)
     records.sort(key=lambda item: (item["uf"], item["municipio"], item["zona"], item["secao"]))
     filters = {"uf": uf, "municipio": municipio, "zona": zona, "secao": secao}
     matching = filter_sections(records, **filters)
     page = matching[offset:offset + limit]
+    matching_counts = aggregation_counts(matching)
+    selected_counts = aggregation_counts(page)
     page_bytes = json.dumps(page, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     report_path = output / "section-inventory.json"
     report = {
@@ -192,6 +199,13 @@ def discover(*, config_id: str, output: Path, uf: str | None = None, municipio: 
         "catalog_sources": catalog_sources,
         "catalog_section_count_before_filters": len(records),
         "matching_section_count": len(matching),
+        "section_counts": {**matching_counts,
+            "selected_registered_sections": selected_counts["registered_sections"],
+            "selected_aggregated_sections": selected_counts["aggregated_sections"],
+            "selected_aggregation_principal_sections": selected_counts["aggregation_principal_sections"],
+            "selected_principal_collectable_sections": selected_counts["principal_collectable_sections"],
+            "effectively_collected_sections": None,
+            "real_failures": None},
         "selection": {"offset": offset, "limit": limit, "selected_count": len(page),
                       "next_offset": offset + len(page) if offset + len(page) < len(matching) else None,
                       "sections_sha256": hashlib.sha256(page_bytes).hexdigest()},

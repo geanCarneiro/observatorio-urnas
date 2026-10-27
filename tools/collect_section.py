@@ -459,7 +459,8 @@ def main() -> int:
     save_atomic(acquisition_path, json.dumps(run, ensure_ascii=False, indent=2).encode())
     print(json.dumps({"section_key": key, "acquisition_id": acquisition_id,
                       "turno": detected_turn, "pleito_id": pleito_id,
-                      "acquisition": str(acquisition_path)}, ensure_ascii=False))
+                      "acquisition": str(acquisition_path),
+                      "file_states": run["file_states"]}, ensure_ascii=False))
     return 0
 
 

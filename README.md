@@ -6,6 +6,8 @@ Coleta de arquivos públicos do TSE por seção, preservando bytes originais, me
 
 O catálogo estadual é salvo sem alteração em `inventario/catalogs/`, e o inventário filtrado em `inventario/section-inventory.json`. Datas e horas do catálogo (`da`, `ha`) são preservadas como texto bruto. A assinatura JWS é registrada como não verificada.
 
+Os campos oficiais `nsp` (seção principal referenciada pela seção agregada) e `nsa` (seções agregadas vinculadas à seção principal) também são preservados como recebidos. O inventário acrescenta os relacionamentos normalizados nos dois sentidos e os valida, registrando referências ausentes, vínculos não recíprocos, múltiplos principais e ciclos em `diagnostics`. Seções agregadas são marcadas com `aggregation_role: "aggregated"` e `collection_status: "aggregated"`; o coletor as ignora sem solicitar arquivos individuais. Inventários mostram as contagens cadastradas, agregadas e coletáveis; após a coleta, o workflow registra coletadas, falhas reais e seções ainda não processadas.
+
 ```sh
 # Uma seção, para reproduzir o piloto
 python tools/discover_sections.py --uf es --municipio 56251 --zona 0054 --secao 0509 --limit 10

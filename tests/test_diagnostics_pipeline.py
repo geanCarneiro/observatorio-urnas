@@ -269,7 +269,8 @@ class DiagnosticPipelineTests(unittest.TestCase):
             if len(calls) == 1:
                 return Completed(1, stderr="synthetic section failure")
             return Completed(0, stdout=json.dumps({"section_key": "es/2/0001/0002", "diagnostics": [],
-                "file_states": [], "acquisition": "acquisition.json"}))
+                "file_states": [{"type": kind, "status": "downloaded"} for kind in ("bu", "rdv", "log")],
+                "acquisition": "acquisition.json"}))
 
         report = collect_sections([{"uf": "es", "municipio": "1", "zona": "1", "secao": "1"},
                                   {"uf": "es", "municipio": "2", "zona": "1", "secao": "2"}],
@@ -279,6 +280,37 @@ class DiagnosticPipelineTests(unittest.TestCase):
         self.assertEqual([section["status"] for section in report["sections"]], ["failed", "collected"])
         self.assertEqual(report["section_count"], 2)
         self.assertEqual(report["diagnostics"][0]["code"], "BATCH_SECTION_COLLECTION_FAILED")
+        self.assertEqual(report["section_counts"]["effectively_collected_sections"], 1)
+        self.assertEqual(report["section_counts"]["real_failures"], 1)
+
+    def test_batch_collection_skips_aggregated_sections_without_invoking_downloader(self):
+        calls = []
+
+        class Completed:
+            returncode = 0
+            stderr = ""
+            stdout = json.dumps({"section_key": "es/56251/0054/0523", "diagnostics": [],
+                "file_states": [{"type": kind, "status": "downloaded"} for kind in ("bu", "rdv", "log")],
+                "acquisition": "acquisition.json"})
+
+        def runner(command, **_kwargs):
+            calls.append(command)
+            return Completed()
+
+        selected = [
+            {"uf": "es", "municipio": "56251", "zona": "0054", "secao": "0524",
+             "nsp": "0523", "aggregation_role": "aggregated", "principal_section_key": "es/56251/0054/0523"},
+            {"uf": "es", "municipio": "56251", "zona": "0054", "secao": "0523",
+             "nsp": None, "nsa": ["0524"], "aggregation_role": "principal"},
+        ]
+        report = collect_sections(selected, Path("unused-output"), runner, limit=2)
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(report["sections"][0]["status"], "aggregated")
+        self.assertEqual(report["sections"][0]["principal_section_key"], "es/56251/0054/0523")
+        self.assertEqual(report["section_counts"]["aggregated_sections"], 1)
+        self.assertEqual(report["section_counts"]["principal_collectable_sections"], 1)
+        self.assertEqual(report["section_counts"]["effectively_collected_sections"], 1)
 
     def test_batch_collection_slices_inventory_by_offset_and_limit(self):
         calls = []
