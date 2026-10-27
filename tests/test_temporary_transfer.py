@@ -75,7 +75,7 @@ class TemporaryTransferTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             index = index_from_rows(Path(temporary), [row("0067", "Voto em Trânsito", "Federal", 13)])
             complete = {"count": 13, "status": "complete", "ambiguous_session_count": 0,
-                        "unassigned_event_count": 0}
+                        "unassigned_event_count": 2351, "reconciliation_relevant_unassigned_event_count": 0}
             self.assertEqual(reconcile_section(index, "es/56251/0054/0067", 2, complete)["status"], "confirmado")
             lower = {**complete, "count": 10}
             self.assertEqual(reconcile_section(index, "es/56251/0054/0067", 2, lower)["status"], "compatível")
@@ -196,20 +196,25 @@ class TemporaryTransferTests(unittest.TestCase):
             self.assertEqual(Path(original["path"]).read_bytes(), b"zip bytes")
             self.assertTrue(Path(result["path"]).exists())
 
-    def test_only_clean_computed_presidential_sessions_count(self):
+    def test_explicit_lifecycle_event_does_not_discard_computed_presidential_session(self):
         sessions = [
             {"computed": True, "computed_event": {"event_date": "2026-10-25"},
+             "habilitation_event": {"event_date": "2026-10-25"},
              "confirmation_events": [{"cargo": "presidente"}], "state_events": []},
             {"computed": True, "computed_event": {"event_date": "2026-10-25"},
+             "habilitation_event": {"event_date": "2026-10-25"},
              "confirmation_events": [{"cargo": "presidente"}, {"cargo": "governador"}], "state_events": []},
             {"computed": True, "computed_event": {"event_date": "2026-10-25"},
+             "habilitation_event": {"event_date": "2026-10-25"},
              "confirmation_events": [{"cargo": "presidente"}], "state_events": [{"event_type": "falha"}]},
             {"computed": False, "computed_event": None,
-             "confirmation_events": [{"cargo": "presidente"}], "state_events": []},
+             "habilitation_event": {"event_date": "2026-10-25"},
+             "confirmation_events": [{"cargo": "presidente"}], "state_events": [],
+             "status": "incompleta_indeterminada"},
         ]
         result = presidential_only_session_metrics(sessions, "2026-10-25")
-        self.assertEqual(result["count"], 1)
-        self.assertEqual(result["ambiguous_session_count"], 1)
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(result["ambiguous_session_count"], 0)
         self.assertEqual(result["computed_session_count"], 3)
         self.assertEqual(result["status"], "incomplete")
 

@@ -389,16 +389,19 @@ def presidential_only_session_count(session_reconstruction: dict, event_date: st
     ambiguous = 0
     for session in relevant:
         cargos = {event.get("cargo") for event in session.get("confirmation_events", [])}
-        state_types = {event.get("event_type") for event in session.get("state_events", [])}
         if "presidente" in cargos and "governador" not in cargos:
-            if state_types.intersection({"suspensao", "interrupcao", "falha"}):
+            if session.get("possible_resumption"):
                 ambiguous += 1
             else:
                 count += 1
+    unassigned_events = session_reconstruction.get("unassigned_events", [])
+    relevant_unassigned_count = session_reconstruction.get("reconciliation_relevant_unassigned_event_count",
+        sum(bool(item.get("reconciliation_relevant", True)) for item in unassigned_events))
     return {"count": count, "ambiguous_session_count": ambiguous,
             "computed_session_count": len(relevant),
-            "unassigned_event_count": len(session_reconstruction.get("unassigned_events", [])),
-            "semantics": "A counted item has a presidential confirmation and a later explicit session-wide vote-computed event, with no governor confirmation or suspension/interruption/failure in that reconstructed session. This does not identify the elector or establish a link to an individual TTE record."}
+            "unassigned_event_count": len(unassigned_events),
+            "reconciliation_relevant_unassigned_event_count": relevant_unassigned_count,
+            "semantics": "A counted item has a presidential confirmation and a later explicit session-wide vote-computed event, no governor confirmation, and no indeterminate resumption link. Classified operational interruptions are reported separately. This does not identify the elector or link a session to an individual TTE record."}
 
 
 def reconcile_section(index: TransferReferenceIndex, section_key: str, turn: int | None,
@@ -411,10 +414,12 @@ def reconcile_section(index: TransferReferenceIndex, section_key: str, turn: int
     expected = index.federal_count(uf, municipality, zone, section, turn) if turn else None
     log_count = log_metric.get("count") if isinstance(log_metric, dict) else None
     log_count_valid = isinstance(log_count, int) and not isinstance(log_count, bool) and log_count >= 0
+    relevant_unassigned = (log_metric.get("reconciliation_relevant_unassigned_event_count",
+        log_metric.get("unassigned_event_count", 0)) if isinstance(log_metric, dict) else None)
     metric_complete = (isinstance(log_metric, dict) and log_metric.get("status") == "complete"
                        and log_metric.get("ambiguous_session_count", 0) == 0
                        and log_metric.get("incomplete_session_count", 0) == 0
-                       and log_metric.get("unassigned_event_count", 0) == 0)
+                       and relevant_unassigned == 0)
     if index.status != "complete":
         status, reason = "dados_insuficientes", "The reference CSV was only partially parsed."
     elif turn != 2:

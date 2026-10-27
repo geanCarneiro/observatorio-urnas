@@ -90,7 +90,7 @@ def extract_collection(acquisition_path: Path, bu_schema: Path, rdv_schema: Path
                                for event in result.get("events", [])],
                     "diagnostics": result.get("diagnostics") or _file_diagnostics(
                         extraction.get("diagnostics", []), kind, name),
-                    "record_policy": "Each allowlisted source event is a separate object in events[]; raw message fields are omitted.",
+                    "record_policy": "Recognized and potentially relevant unclassified events remain individual objects in events[]; only the fifth log message field is retained for potentially relevant unclassified events, while other raw tabular fields are omitted.",
                 }
             _write_json(source_path.with_name(source_path.name + ".json"), payload)
 

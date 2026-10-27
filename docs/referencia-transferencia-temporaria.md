@@ -12,7 +12,7 @@ Antes de implementar o leitor, o cabeçalho do CSV e o `leiame.pdf` no ZIP foram
 
 O dicionário define `Federal` como transferência para outro estado ou país. Para voto em trânsito, define voto apenas para Presidente quando a pessoa está fora da UF de domicílio. A comparação usa todos os registros de abrangência `Federal` como quantidade de referência da seção, mantendo `TP_TTE` separado no detalhamento; isso é uma comparação agregada de compatibilidade, não prova que cada sessão ou cada modalidade federal corresponda a voto exclusivamente presidencial.
 
-Na análise, a métrica do log exige sessão reconstruída com habilitação, confirmação presidencial e evento explícito posterior de voto computado, sem confirmação de governador nem evento de suspensão, interrupção ou falha. Sessões isoladas não são ligadas a pessoas ou linhas da base. Os status são:
+Na análise, a métrica do log exige sessão reconstruída com habilitação, confirmação presidencial e evento explícito posterior de voto computado, sem confirmação de governador e sem uma possível retomada indeterminada de sessão anterior interrompida no mesmo fluxo e na mesma data. Eventos operacionais de suspensão/falha permanecem classificados e não invalidam automaticamente outra sessão. Sessões isoladas não são ligadas a pessoas ou linhas da base. Os status são:
 
 - `confirmado`: contagem do log igual à quantidade federal da seção; confirmação somente no nível agregado.
 - `compatível`: contagem do log menor que a quantidade federal; diferenças podem refletir eleitores que não votaram.

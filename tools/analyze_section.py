@@ -29,11 +29,30 @@ EVENTS = {
     "Procedimento de encerramento confirmado": "conclusao_encerramento",
 }
 EVENT_KEYWORDS = {
-    "suspens": "suspensao",
-    "interrup": "interrupcao",
+    "deslig": "desligamento",
+    "reinici": "reinicializacao",
+    "reinicial": "reinicializacao",
     "falha": "falha",
     "erro": "falha",
+    "suspens": "suspensao",
+    "interrup": "interrupcao",
     "cancel": "interrupcao",
+}
+POTENTIALLY_RELEVANT_KEYWORDS = (
+    "vot", "habilit", "confirm", "comput", "suspens", "interrup",
+    "falha", "erro", "cancel", "deslig", "reinici", "reinicial", "encerr",
+)
+VOTING_EVIDENCE_TYPES = {
+    "habilitacao", "voto_confirmado_governador", "voto_confirmado_presidente", "voto_computado",
+}
+OPERATIONAL_LIFECYCLE_TYPES = {
+    "suspensao", "interrupcao", "falha", "desligamento", "reinicializacao",
+}
+ADMINISTRATIVE_EVENT_TYPES = {
+    "comando_encerramento", "inicio_encerramento", "conclusao_encerramento",
+}
+INTERRUPTED_SESSION_STATUSES = {
+    "suspensa_sem_voto", "interrompida_por_falha", "interrompida_por_desligamento",
 }
 DEFAULT_CUTS = ("17:00", "17:15", "17:30", "17:45", "18:00", "18:30", "19:00")
 BU_SCHEMA_SOURCE = "https://www.tse.jus.br/eleicoes/eleicoes-2026-content/arquivos/formato-arquivos-de-bu-rdv-e-assinatura-digital"
@@ -87,7 +106,46 @@ def _event_type(message: str) -> str | None:
     for keyword, event_type in EVENT_KEYWORDS.items():
         if keyword in normalized:
             return event_type
+    if any(keyword in normalized for keyword in POTENTIALLY_RELEVANT_KEYWORDS):
+        return "evento_desconhecido_relevante"
     return None
+
+
+def classify_unassigned_event(item: dict) -> dict:
+    """Classify why a raw event is unassigned and whether it blocks vote reconciliation."""
+    event_type = item.get("event", {}).get("event_type")
+    if event_type in OPERATIONAL_LIFECYCLE_TYPES:
+        return {"classification": "operational_lifecycle", "reconciliation_relevant": False,
+                "reconciliation_impact": "informational",
+                "classification_reason": "Lifecycle/operational event without an open voting session; preserved but not itself a vote."}
+    if event_type in ADMINISTRATIVE_EVENT_TYPES:
+        return {"classification": "administrative", "reconciliation_relevant": False,
+                "reconciliation_impact": "informational",
+                "classification_reason": "Administrative election/closure event is retained separately from voter-session evidence."}
+    if event_type in VOTING_EVIDENCE_TYPES:
+        return {"classification": "voting_evidence_without_session", "reconciliation_relevant": True,
+                "reconciliation_impact": "blocking",
+                "classification_reason": "Voting evidence without an associated habilitation can affect session and vote interpretation."}
+    return {"classification": "potentially_relevant_unknown", "reconciliation_relevant": True,
+            "reconciliation_impact": "blocking",
+            "classification_reason": "Unknown event semantics are preserved and treated as potentially relevant until classified."}
+
+
+def _interruption_classification(session: dict) -> tuple[str, dict | None]:
+    state_events = session.get("state_events", [])
+    if not state_events:
+        return "incompleta_indeterminada", None
+    classification = {
+        "suspensao": "suspensa_sem_voto",
+        "falha": "interrompida_por_falha",
+        "desligamento": "interrompida_por_desligamento",
+        "reinicializacao": "interrompida_por_desligamento",
+    }
+    for event in state_events:
+        status = classification.get(event.get("event_type"))
+        if status:
+            return status, event
+    return "incompleta_indeterminada", state_events[0]
 
 
 def reconstruct_voting_sessions(events: list[dict]) -> dict:
@@ -97,27 +155,39 @@ def reconstruct_voting_sessions(events: list[dict]) -> dict:
     active_by_equipment: dict[str, dict] = {}
     session_numbers = Counter()
 
-    def finish(equipment: str, status: str, end_event: dict | None = None) -> None:
+    def finish(equipment: str, status: str, end_event: dict | None = None,
+               closure_trigger_event: dict | None = None) -> dict | None:
         current = active_by_equipment.pop(equipment, None)
         if current is None:
-            return
+            return None
         current["status"] = status
         current["end_event"] = end_event
+        current["closure_trigger_event"] = closure_trigger_event or end_event
         current["computed"] = status == "computed"
+        current["completion_after_lifecycle_event"] = bool(current["computed"] and current["state_events"])
+        if status in INTERRUPTED_SESSION_STATUSES or status == "incompleta_indeterminada":
+            current["interruption_classification"] = status
         current["cargo_confirmations"] = {
             cargo: [event for event in current["confirmation_events"] if event["cargo"] == cargo]
             for cargo in ("governador", "presidente")
         }
         sessions.append(current)
+        return current
 
     for event in events:
         equipment = str(event.get("equipment_identifier") or event.get("source_file_sha256") or "unknown")
         kind = event["event_type"]
         if kind == "habilitacao":
+            previous = None
             if equipment in active_by_equipment:
-                finish(equipment, "incomplete_superseded_by_next_habilitation", event)
+                active = active_by_equipment[equipment]
+                status, terminal_event = _interruption_classification(active)
+                if status == "incompleta_indeterminada" and not active["state_events"]:
+                    status = "incompleta_indeterminada"
+                    terminal_event = None
+                previous = finish(equipment, status, terminal_event, event)
             session_numbers[equipment] += 1
-            active_by_equipment[equipment] = {
+            current = {
                 "equipment_identifier": equipment,
                 "session_number": session_numbers[equipment],
                 "habilitation_event": event,
@@ -125,6 +195,27 @@ def reconstruct_voting_sessions(events: list[dict]) -> dict:
                 "state_events": [],
                 "computed_event": None,
             }
+            if (previous and previous.get("state_events")
+                    and previous.get("habilitation_event", {}).get("event_date") == event.get("event_date")
+                    and previous.get("confirmation_events")):
+                current["possible_resumption"] = {
+                    "classification": "retomada_indeterminada",
+                    "possibility": "possible",
+                    "identity_status": "indeterminate",
+                    "prior_session_number": previous["session_number"],
+                    "evidence": {
+                        "same_log_stream": True,
+                        "prior_interruption_status": previous["status"],
+                        "prior_habilitation_line": previous["habilitation_event"].get("line_number"),
+                        "prior_cargo_confirmation_lines": [item.get("line_number")
+                            for item in previous["confirmation_events"]],
+                        "interruption_line": (previous.get("end_event") or {}).get("line_number"),
+                        "new_habilitation_line": event.get("line_number"),
+                    },
+                    "identity_link_established": False,
+                    "reason": "A new habilitation follows an explicitly interrupted session in the same log stream, but logs contain no elector/session identifier to prove this is the same elector; sessions are not merged.",
+                }
+            active_by_equipment[equipment] = current
         elif kind in {"voto_confirmado_governador", "voto_confirmado_presidente"}:
             current = active_by_equipment.get(equipment)
             if current is None:
@@ -145,12 +236,28 @@ def reconstruct_voting_sessions(events: list[dict]) -> dict:
                 unassigned.append({"reason": "state_event_without_open_habilitation", "event": event})
             else:
                 current["state_events"].append(event)
+        elif kind in {"desligamento", "reinicializacao"}:
+            current = active_by_equipment.get(equipment)
+            if current is None:
+                unassigned.append({"reason": "lifecycle_event_without_open_habilitation", "event": event})
+            else:
+                current["state_events"].append(event)
+        else:
+            unassigned.append({"reason": "unrecognized_event_without_session_semantics", "event": event})
 
     for equipment in list(active_by_equipment):
-        finish(equipment, "incomplete_at_end_of_log")
+        current = active_by_equipment[equipment]
+        status, terminal_event = _interruption_classification(current)
+        finish(equipment, status, terminal_event)
+    for item in unassigned:
+        item.update(classify_unassigned_event(item))
     sessions.sort(key=lambda item: (item["equipment_identifier"], item["session_number"]))
+    unassigned_counts = Counter(item["classification"] for item in unassigned)
     return {"sessions": sessions, "unassigned_events": unassigned,
-            "semantics": "Only an explicit voto_computado event finalizes a reconstructed session; confirmations remain separate evidence."}
+            "unassigned_event_count": len(unassigned),
+            "unassigned_event_classification_counts": dict(sorted(unassigned_counts.items())),
+            "reconciliation_relevant_unassigned_event_count": sum(item["reconciliation_relevant"] for item in unassigned),
+            "semantics": "Only an explicit voto_computado event completes a session. Explicit lifecycle events classify interrupted sessions; an unassigned follow-up habilitation is recorded as a possible, indeterminate resumption without merging sessions."}
 
 
 def summarize_events_by_date(events: list[dict]) -> dict:
@@ -197,31 +304,43 @@ def presidential_only_session_metrics(sessions: list[dict], event_date: str,
                 and (session.get("computed_event") or {}).get("event_date") == event_date]
     election_day_sessions = [session for session in sessions
                              if session.get("habilitation_event", {}).get("event_date") == event_date]
-    incomplete_session_count = sum(not session.get("computed") for session in election_day_sessions)
+    incomplete_session_count = sum(session.get("status") == "incompleta_indeterminada"
+                                   for session in election_day_sessions)
     count = 0
     ambiguous = 0
     for session in computed:
         cargos = {event.get("cargo") for event in session.get("confirmation_events", [])}
-        state_types = {event.get("event_type") for event in session.get("state_events", [])}
         if "presidente" in cargos and "governador" not in cargos:
-            if state_types.intersection({"suspensao", "interrupcao", "falha"}):
+            if session.get("possible_resumption"):
                 ambiguous += 1
             else:
                 count += 1
     unassigned_for_date = [item for item in (unassigned_events or [])
                            if item.get("event", {}).get("event_date") == event_date]
+    classified_unassigned = [item if "reconciliation_relevant" in item else
+                             {**item, **classify_unassigned_event(item)} for item in unassigned_for_date]
+    relevant_unassigned = [item for item in classified_unassigned if item.get("reconciliation_relevant")]
+    unassigned_classification_counts = Counter(item.get("classification", "unknown") for item in classified_unassigned)
+    interrupted_counts = Counter(session.get("status") for session in election_day_sessions
+        if session.get("status") in INTERRUPTED_SESSION_STATUSES)
     session_coverage_matches = (habilitation_event_count is None
                                 or habilitation_event_count == len(election_day_sessions))
     return {"count": count, "ambiguous_session_count": ambiguous,
             "computed_session_count": len(computed), "incomplete_session_count": incomplete_session_count,
             "unassigned_event_count": len(unassigned_for_date),
+            "unassigned_operational_event_count": len(classified_unassigned) - len(relevant_unassigned),
+            "reconciliation_relevant_unassigned_event_count": len(relevant_unassigned),
+            "unassigned_event_classification_counts": dict(sorted(unassigned_classification_counts.items())),
             "habilitation_event_count": habilitation_event_count,
             "reconstructed_session_count": len(election_day_sessions),
             "session_coverage_matches_habilitations": session_coverage_matches,
+            "interrupted_session_counts": dict(sorted(interrupted_counts.items())),
+            "possible_resumption_session_count": sum(bool(session.get("possible_resumption"))
+                for session in election_day_sessions),
             "event_date_present": event_date_present,
             "status": "complete" if event_date_present and session_coverage_matches and not ambiguous
-                and not incomplete_session_count and not unassigned_for_date else "incomplete",
-            "semantics": "A counted session has a presidential confirmation and a later explicit session-wide vote-computed event, with no governor confirmation or suspension/interruption/failure in that reconstructed session. This is a section-level count and does not identify the elector or link a session to a TTE record."}
+                and not incomplete_session_count and not relevant_unassigned else "incomplete",
+            "semantics": "A counted session has a presidential confirmation and explicit vote-computed event, no governor confirmation, and no indeterminate resumption link to a prior interrupted session. Explicitly classified operational interruptions are reported separately and do not by themselves invalidate unrelated computed sessions. This count does not identify electors or link sessions to TTE records."}
 
 
 def reconcile_log_metrics(events: list[dict], sessions: list[dict], bu: dict,
@@ -665,6 +784,9 @@ def process_log_file(path: Path, metadata: dict, section: str, cuts: list[str]) 
                 "event_time": hhmm, "at_or_after_clock_cuts": [cut for cut in cuts if hhmm >= cut],
                 "event_timezone": "unknown", "event_timestamp_utc": None,
                 "event_timestamp_brt": None, "parser_status": "allowlist_match"}
+            if event_type == "evento_desconhecido_relevante":
+                event["message_raw"] = message
+                event["parser_status"] = "potentially_relevant_unclassified"
             events.append(event)
             counts[event_type] += 1
             event_date = timestamp.strftime("%Y-%m-%d")
