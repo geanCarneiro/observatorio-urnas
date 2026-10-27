@@ -11,7 +11,7 @@ from pathlib import Path
 
 from analyze_section import analyze_collection
 from election_turns import turn_for_pleito
-from temporary_transfer import write_reconciliation
+from temporary_transfer import reference_identity, write_reconciliation, write_section_excerpts, write_validation
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -38,7 +38,8 @@ def _file_diagnostics(diagnostics: list[dict], kind: str, name: str) -> list[dic
     return [item for item in diagnostics if item.get("file_type") == kind and item.get("file_name") == name]
 
 
-def extract_collection(acquisition_path: Path, bu_schema: Path, rdv_schema: Path) -> None:
+def extract_collection(acquisition_path: Path, bu_schema: Path, rdv_schema: Path,
+                      reference_excerpt: dict | None = None) -> None:
     acquisition = json.loads(acquisition_path.read_text(encoding="utf-8"))
     extraction = analyze_collection(acquisition_path, [], bu_schema, rdv_schema)
     acquisition_source = {
@@ -100,12 +101,17 @@ def extract_collection(acquisition_path: Path, bu_schema: Path, rdv_schema: Path
         _write_json(acquisition_path, acquisition)
 
     transfer_reconciliation = extraction.get("transferencia_temporaria")
+    if transfer_reconciliation and reference_excerpt:
+        transfer_reconciliation["reference_excerpt"] = reference_excerpt
     if transfer_reconciliation and transfer_reconciliation.get("turno") == 2:
         output_root = acquisition_path.parent
         write_reconciliation([transfer_reconciliation],
             output_root / "transferencia-temporaria-reconciliacao.json",
             output_root / "transferencia-temporaria-reconciliacao.csv",
             "section_analysis_log_sessions")
+        write_validation([transfer_reconciliation],
+            output_root / "transferencia-temporaria-validation.json",
+            source_note="section_analysis_log_sessions")
 
 
 def main() -> int:
@@ -115,8 +121,29 @@ def main() -> int:
     parser.add_argument("--schema", type=Path, default=Path("schemas/bu.asn1"))
     parser.add_argument("--rdv-schema", type=Path, default=Path("schemas/rdv.asn1"))
     args = parser.parse_args()
+    acquisitions = []
+    targets = []
     for acquisition in args.acquisition:
-        extract_collection(acquisition, args.schema, args.rdv_schema)
+        collection = json.loads(acquisition.read_text(encoding="utf-8"))
+        acquisitions.append((acquisition, collection))
+        section_key = collection.get("section_key")
+        turn = collection.get("turno") or {"3220": 1, "3221": 2}.get(str(collection.get("data_id")))
+        if isinstance(section_key, str) and turn in {1, 2, "1", "2"}:
+            targets.append({"section_key": section_key, "turn": int(turn),
+                            "output_path": acquisition.parent / "transferencia-temporaria-elegiveis.csv"})
+    try:
+        excerpt_metadata = write_section_excerpts(targets)
+    except Exception as error:
+        identity = reference_identity()
+        excerpt_metadata = {str(target["output_path"]): {
+            "status": "not_generated", "reason": f"{type(error).__name__}: {error}",
+            "reference_zip_sha256": identity.get("zip_sha256"),
+            "reference_version": identity.get("version"),
+        } for target in targets}
+    for acquisition, _collection in acquisitions:
+        excerpt_path = acquisition.parent / "transferencia-temporaria-elegiveis.csv"
+        extract_collection(acquisition, args.schema, args.rdv_schema,
+                           excerpt_metadata.get(str(excerpt_path)))
     return 0
 
 

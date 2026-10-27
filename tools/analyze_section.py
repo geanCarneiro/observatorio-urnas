@@ -988,6 +988,7 @@ def analyze_collection(collection_path: Path, cuts: list[str], bu_schema_path: P
 
     transfer_reconciliation = {"section_key": section, "turno": collection.get("turno"),
         "status": "dados_insuficientes", "reason": "Section BU/log analysis did not produce the required comparison metric."}
+    round_number = collection.get("turno")
     try:
         from temporary_transfer import load_reference, reconcile_section
         decoded_bu = next((item.get("data") for item in bu_results if item.get("data")), None)
@@ -995,6 +996,7 @@ def analyze_collection(collection_path: Path, cuts: list[str], bu_schema_path: P
         recon = (legacy_report or {}).get("validation", {}).get("bu_reconciliation", {})
         log_metric = recon.get("by_metric", {}).get("sessoes_computadas_exclusivamente_presidente")
         event_date = (decoded_bu or {}).get("election_date")
+        transfer_reconciliation["turno"] = round_number
         if not isinstance(section, str):
             transfer_reconciliation["reason"] = "Acquisition has no section identity."
         elif round_number != 2:
@@ -1002,7 +1004,9 @@ def analyze_collection(collection_path: Path, cuts: list[str], bu_schema_path: P
         else:
             transfer_reconciliation = reconcile_section(load_reference(), section, round_number, log_metric, event_date)
     except Exception as error:
-        transfer_reconciliation["reason"] = f"The preserved TSE reference could not be loaded: {type(error).__name__}: {error}"
+        transfer_reconciliation.update({"section_key": section, "turno": round_number,
+            "status": "dados_insuficientes",
+            "reason": f"The preserved TSE reference could not be loaded: {type(error).__name__}: {error}"})
 
     diagnostics.extend([])
     successful = [result for result in log_results if result.get("status", "").startswith("processed")]

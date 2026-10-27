@@ -243,6 +243,144 @@ def load_reference(directory: Path = BASE_DIR) -> TransferReferenceIndex:
     return _load_index_cached(str(zip_path), str(provenance_path), str(expected_sha), stat.st_size, stat.st_mtime_ns)
 
 
+def reference_identity(directory: Path = BASE_DIR) -> dict:
+    """Return the pinned reference identity even when its ZIP cannot be parsed or opened."""
+    result = {"resource_id": RESOURCE_ID, "version": None, "zip_file": None,
+              "zip_sha256": None, "obtained_at_utc": None, "available": False}
+    manifest_path = directory / "reference.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        result["resource_id"] = manifest.get("resource_id", RESOURCE_ID)
+        filename = manifest.get("current_zip")
+        version = next((item for item in manifest.get("versions", [])
+                        if item.get("zip_file") == filename), None)
+        if filename:
+            result["zip_file"] = filename
+            result["version"] = filename
+        if version:
+            result["zip_sha256"] = version.get("sha256")
+            result["obtained_at_utc"] = version.get("obtained_at_utc")
+    except (OSError, ValueError, TypeError):
+        pass
+    if result["zip_file"]:
+        provenance_path = directory / f"{result['zip_file']}.provenance.json"
+        try:
+            provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+            result["resource_id"] = provenance.get("resource_id", result["resource_id"])
+            result["zip_sha256"] = result["zip_sha256"] or provenance.get("sha256")
+            result["obtained_at_utc"] = result["obtained_at_utc"] or provenance.get("obtained_at_utc")
+            result["resource_url_discovered_via_ckan"] = provenance.get("resource_metadata", {}).get("url")
+        except (OSError, ValueError, TypeError):
+            pass
+        result["available"] = (directory / result["zip_file"]).is_file()
+    return result
+
+
+def write_section_excerpts(targets: list[dict], directory: Path = BASE_DIR,
+                           index: TransferReferenceIndex | None = None) -> dict[str, dict]:
+    """Write original-column CSV slices only for section/turn acquisitions supplied by the caller."""
+    if not targets:
+        return {}
+    index = index or load_reference(directory)
+    if index.status != "complete":
+        raise ValueError("cannot produce eligible-elector excerpts from a partially parsed reference")
+    target_map: dict[tuple[str, str, str, str, int], list[dict]] = defaultdict(list)
+    for target in targets:
+        key_parts = str(target.get("section_key", "")).split("/")
+        turn = target.get("turn")
+        output_path = Path(target["output_path"])
+        if len(key_parts) != 4 or turn not in {1, 2}:
+            continue
+        uf, municipality, zone, section = key_parts
+        key = (uf.upper(), municipality.zfill(5), zone.zfill(4), section.zfill(4), int(turn))
+        target_map[key].append({"output_path": output_path, "row_count": 0, "electors": 0,
+                                "federal_electors": 0, "breakdown": Counter()})
+    if not target_map:
+        return {}
+
+    temporary_files: list[Path] = []
+    open_outputs: list[tuple[dict, object, csv.writer, Path]] = []
+    try:
+        for entries in target_map.values():
+            for entry in entries:
+                output_path = entry["output_path"]
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                fd, temp_name = tempfile.mkstemp(prefix=f".{output_path.name}.", dir=output_path.parent)
+                temporary_path = Path(temp_name)
+                temporary_files.append(temporary_path)
+                stream = os.fdopen(fd, "w", encoding="utf-8-sig", newline="")
+                open_outputs.append((entry, stream, None, temporary_path))
+
+        output_lookup = {entry["output_path"]: index for index, (entry, _stream, _writer, _temp) in enumerate(open_outputs)}
+        with zipfile.ZipFile(index.zip_path) as archive:
+            with archive.open(MEMBER_CSV) as binary, io.TextIOWrapper(binary, encoding="latin-1", newline="") as text:
+                reader = csv.DictReader(text, delimiter=";", quotechar='"')
+                columns = list(reader.fieldnames or [])
+                if not REQUIRED_COLUMNS.issubset(columns):
+                    raise ValueError("official CSV header lacks required columns while writing section excerpts")
+                for position, (entry, stream, _writer, temporary_path) in enumerate(open_outputs):
+                    writer = csv.writer(stream, delimiter=";", quotechar='"', quoting=csv.QUOTE_ALL,
+                                        lineterminator="\n")
+                    writer.writerow(columns)
+                    open_outputs[position] = (entry, stream, writer, temporary_path)
+                for row in reader:
+                    try:
+                        if row.get("AA_ELEICAO") != "2026":
+                            continue
+                        turn = int(row["NR_TURNO"])
+                        key = (row["SG_UF_DESTINO"].upper(), row["CD_MUNICIPIO_DESTINO"].zfill(5),
+                               row["NR_ZONA_DESTINO"].zfill(4), row["NR_SECAO_DESTINO"].zfill(4), turn)
+                        destinations = target_map.get(key)
+                        if not destinations:
+                            continue
+                        amount = int(row["QT_ELEITOR"])
+                        if amount < 0:
+                            continue
+                        breakdown_key = (row["TP_TTE"], row["TP_ABRANGENCIA_TTE"])
+                        for entry in destinations:
+                            output_position = output_lookup[entry["output_path"]]
+                            _entry, _stream, writer, _temporary_path = open_outputs[output_position]
+                            writer.writerow([row.get(column, "") for column in columns])
+                            entry["row_count"] += 1
+                            entry["electors"] += amount
+                            entry["breakdown"][breakdown_key] += amount
+                            if row["TP_ABRANGENCIA_TTE"].casefold() == "federal".casefold():
+                                entry["federal_electors"] += amount
+                    except (KeyError, TypeError, ValueError, AttributeError):
+                        continue
+        for _entry, stream, _writer, _temporary_path in open_outputs:
+            stream.flush()
+            os.fsync(stream.fileno())
+            stream.close()
+        outputs = {}
+        for entry, _stream, _writer, temporary_path in open_outputs:
+            output_path = entry["output_path"]
+            os.replace(temporary_path, output_path)
+            digest = _sha256_path(output_path)
+            repo_root = Path(__file__).resolve().parents[1]
+            try:
+                displayed_path = str(output_path.resolve().relative_to(repo_root))
+            except ValueError:
+                displayed_path = str(output_path)
+            outputs[str(output_path)] = {
+                "path": displayed_path, "sha256": digest, "row_count": entry["row_count"],
+                "registered_electors_all_scopes": entry["electors"],
+                "registered_electors_federal_scope": entry["federal_electors"],
+                "transfer_type_scope_breakdown": [
+                    {"tipo_transferencia": kind, "abrangencia": scope, "quantidade_eleitores": count}
+                    for (kind, scope), count in sorted(entry["breakdown"].items())],
+                "reference_zip_sha256": index.expected_sha256,
+            }
+        return outputs
+    finally:
+        for _entry, stream, _writer, _temporary_path in open_outputs:
+            if not stream.closed:
+                stream.close()
+        for temporary_path in temporary_files:
+            if temporary_path.exists():
+                temporary_path.unlink()
+
+
 def presidential_only_session_count(session_reconstruction: dict, event_date: str) -> dict:
     sessions = session_reconstruction.get("sessions", [])
     relevant = [session for session in sessions
@@ -326,7 +464,56 @@ def write_reconciliation(rows: list[dict], json_path: Path, csv_path: Path,
                         report["log_presidential_only_computed_sessions"] - report["reference_federal_transfer_count"]
                         if report.get("log_presidential_only_computed_sessions") is not None
                         and report.get("reference_federal_transfer_count") is not None else None),
-                    "source_zip_sha256": report.get("reference", {}).get("zip_sha256")})
+                    "source_zip_sha256": (report.get("reference") or {}).get("zip_sha256")})
+
+
+def write_validation(rows: list[dict], json_path: Path, directory: Path = BASE_DIR,
+                     source_note: str = "section_analysis_log_sessions") -> None:
+    """Write a compact audit record without bundling the reference ZIP itself."""
+    identity = reference_identity(directory)
+    row_reference = next((row.get("reference") for row in rows if row.get("reference")), None)
+    if row_reference:
+        identity.update({
+            "resource_id": row_reference.get("resource_id") or identity["resource_id"],
+            "version": row_reference.get("zip_path") or identity.get("version"),
+            "zip_sha256": row_reference.get("zip_sha256") or identity.get("zip_sha256"),
+            "obtained_at_utc": row_reference.get("obtained_at_utc") or identity.get("obtained_at_utc"),
+            "resource_url_discovered_via_ckan": row_reference.get("resource_url_discovered_via_ckan")
+                or identity.get("resource_url_discovered_via_ckan"),
+        })
+    sections = []
+    differences = []
+    divergences = []
+    for row in rows:
+        reference_count = row.get("reference_federal_transfer_count")
+        log_count = row.get("log_presidential_only_computed_sessions")
+        difference = log_count - reference_count if isinstance(log_count, int) and isinstance(reference_count, int) else None
+        section = {key: row.get(key) for key in (
+            "section_key", "uf", "municipio", "zona", "secao", "turno", "status", "reason", "event_date",
+            "log_presidential_only_computed_sessions", "log_metric_detail", "reference_federal_transfer_count",
+            "reference_transfer_type_scope_breakdown", "reference_rows_present", "reference_excerpt",
+            "individual_session_tte_join_performed")}
+        section["difference_log_minus_reference"] = difference
+        sections.append(section)
+        if difference not in (None, 0):
+            differences.append({"section_key": row.get("section_key"), "difference_log_minus_reference": difference,
+                                "status": row.get("status")})
+        if row.get("status") == "divergente":
+            divergences.append({"section_key": row.get("section_key"), "difference_log_minus_reference": difference,
+                                "reason": row.get("reason")})
+    payload = {
+        "report_type": "tse_temporary_transfer_validation",
+        "schema_version": 1,
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "source": source_note,
+        "reference": {**identity, "base_embedded_in_artifact": False},
+        "sections_examined": sections,
+        "section_count": len(sections),
+        "status_counts": dict(Counter(row.get("status") for row in rows)),
+        "differences": differences,
+        "divergences": divergences,
+    }
+    _atomic_write(json_path, (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode())
 
 
 def main() -> int:

@@ -11,8 +11,9 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from temporary_transfer import (MEMBER_CSV, TransferReferenceIndex, load_reference,
-    reconcile_section, update_reference, write_reconciliation)
+    reconcile_section, update_reference, write_reconciliation, write_section_excerpts, write_validation)
 from analyze_section import presidential_only_session_metrics
+from extract_section_data import extract_collection
 
 
 HEADERS = ["DT_GERACAO", "HH_GERACAO", "AA_ELEICAO", "NR_TURNO", "TP_TTE", "TP_ABRANGENCIA_TTE",
@@ -106,6 +107,63 @@ class TemporaryTransferTests(unittest.TestCase):
             self.assertEqual(payload["sections"][0]["status"], "confirmado")
             self.assertEqual(rows[0]["tipo_transferencia"], "Militar em Serviço")
             self.assertEqual(rows[0]["source_zip_sha256"], index.expected_sha256)
+
+    def test_validation_artifact_is_written_for_insufficient_cross_without_redistributing_reference(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            acquisition_dir = root / "es/56251/0054/0067/turno2"
+            acquisition_dir.mkdir(parents=True)
+            acquisition_path = acquisition_dir / "acquisition.json"
+            acquisition_path.write_text(json.dumps({"section_key": "es/56251/0054/0067", "turno": 2}))
+            missing_reference = root / "missing-reference"
+            missing_reference.mkdir()
+            missing_reference.joinpath("reference.json").write_text(json.dumps({
+                "resource_id": "fixture-id", "current_zip": "official-v2.zip",
+                "versions": [{"zip_file": "official-v2.zip", "sha256": "f" * 64,
+                              "obtained_at_utc": "2026-10-27T00:00:00Z"}]}))
+            result = {"transferencia_temporaria": {
+                "section_key": "es/56251/0054/0067", "turno": 2, "status": "dados_insuficientes",
+                "reason": "reference unavailable", "log_presidential_only_computed_sessions": 13,
+                "reference_federal_transfer_count": None, "reference": None}}
+            with patch("extract_section_data.analyze_collection", return_value=result), \
+                    patch("extract_section_data.write_validation", side_effect=lambda rows, path, source_note:
+                          write_validation(rows, path, missing_reference, source_note)):
+                extract_collection(acquisition_path, Path("bu.asn1"), Path("rdv.asn1"))
+            validation_path = acquisition_dir / "transferencia-temporaria-validation.json"
+            self.assertTrue(validation_path.exists())
+            validation = json.loads(validation_path.read_text(encoding="utf-8"))
+            self.assertFalse(validation["reference"]["base_embedded_in_artifact"])
+            self.assertEqual(validation["reference"]["zip_sha256"], "f" * 64)
+            self.assertFalse(validation["reference"]["available"])
+            self.assertEqual(validation["sections_examined"][0]["section_key"], "es/56251/0054/0067")
+            self.assertEqual(validation["sections_examined"][0]["status"], "dados_insuficientes")
+            self.assertEqual(validation["status_counts"], {"dados_insuficientes": 1})
+
+    def test_section_excerpt_keeps_original_columns_and_counts_every_federal_modality(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            index = index_from_rows(root, [
+                row("0609", "Voto em Trânsito", "Federal", 0),
+                row("0609", "Militar em Serviço", "Federal", 1),
+                row("0609", "Justiça Eleitoral", "Federal", 2),
+                row("0609", "Militar em Serviço", "Estadual", 10),
+                row("0610", "Voto em Trânsito", "Federal", 99),
+            ])
+            output = root / "coletada/turno2/transferencia-temporaria-elegiveis.csv"
+            result = write_section_excerpts([{
+                "section_key": "es/56251/0054/0609", "turn": 2, "output_path": output}], index=index)
+            with output.open(encoding="utf-8-sig", newline="") as stream:
+                reader = csv.DictReader(stream, delimiter=";")
+                rows = list(reader)
+                fields = reader.fieldnames
+            self.assertEqual(fields, HEADERS)
+            self.assertEqual(len(rows), 4)
+            self.assertEqual({item["NR_SECAO_DESTINO"] for item in rows}, {"0609"})
+            metadata = result[str(output)]
+            self.assertEqual(metadata["row_count"], 4)
+            self.assertEqual(metadata["registered_electors_all_scopes"], 13)
+            self.assertEqual(metadata["registered_electors_federal_scope"], 3)
+            self.assertEqual(metadata["reference_zip_sha256"], index.expected_sha256)
 
     def test_explicit_refresh_uses_ckan_discovered_url_and_preserves_version(self):
         class Response:
