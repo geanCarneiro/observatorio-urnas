@@ -33,7 +33,7 @@ concurrency:
 jobs:
   coletar-e-extrair:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -41,7 +41,7 @@ jobs:
           python-version: '3.12'
       - name: Instalar dependências do decoder ASN.1
         run: python -m pip install -r requirements.txt
-      - name: Coletar manifesto, BU, log e RDV
+      - name: Coletar manifesto, BU, log e RDV dos dois turnos
         id: collect
         env:
           UF: ${{ inputs.uf }}
@@ -49,23 +49,28 @@ jobs:
           ZONA: ${{ inputs.zona }}
           SECAO: ${{ inputs.secao }}
         run: |
-          python tools/collect_section.py \
-            --uf "$UF" --municipio "$MUNICIPIO" --zona "$ZONA" --secao "$SECAO" \
-            --output dados > "$RUNNER_TEMP/coleta.json"
-          python - <<'PY' >> "$GITHUB_OUTPUT"
-          import json, os, pathlib
-          x=json.load(open(os.path.join(os.environ['RUNNER_TEMP'],'coleta.json')))
-          print('section_key='+x['section_key'])
-          print('run_dir='+str(pathlib.Path(x['acquisition']).parent))
+          for turn_data in "1:3220" "2:3221"; do
+            IFS=: read -r TURN DATA_ID <<< "$turn_data"
+            python tools/collect_section.py \
+              --uf "$UF" --municipio "$MUNICIPIO" --zona "$ZONA" --secao "$SECAO" \
+              --data-id "$DATA_ID" --output dados > "$RUNNER_TEMP/coleta-$TURN.json"
+            python - "$RUNNER_TEMP/coleta-$TURN.json" "$GITHUB_OUTPUT" "$TURN" <<'PY'
+          import json, pathlib, sys
+          result = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          with pathlib.Path(sys.argv[2]).open("a", encoding="utf-8") as output:
+              print(f"section_key={result['section_key']}", file=output)
+              print(f"acquisition_{sys.argv[3]}={result['acquisition']}", file=output)
           PY
-      - name: Extrair campos estruturados junto aos arquivos de origem
+          done
+      - name: Extrair campos estruturados dos dois turnos
         run: |
           python tools/extract_section_data.py \
-            --acquisition "${{ steps.collect.outputs.run_dir }}/acquisition.json"
+            --acquisition "${{ steps.collect.outputs.acquisition_1 }}" \
+            --acquisition "${{ steps.collect.outputs.acquisition_2 }}"
       - name: Publicar dados organizados por seção e turno
         uses: actions/upload-artifact@v4
         with:
-          name: dados-piloto-${{ inputs.uf }}-${{ inputs.municipio }}-${{ inputs.zona }}-${{ inputs.secao }}
+          name: dados-piloto-dois-turnos-${{ inputs.uf }}-${{ inputs.municipio }}-${{ inputs.zona }}-${{ inputs.secao }}
           path: dados/${{ steps.collect.outputs.section_key }}/
           if-no-files-found: error
           retention-days: 90

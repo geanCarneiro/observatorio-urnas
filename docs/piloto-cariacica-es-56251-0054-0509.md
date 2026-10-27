@@ -10,7 +10,7 @@ Esta página documenta a configuração inicial do piloto da aplicação. Ela n�
 - Verificar os hashes dos arquivos contra o registro da aquisição, integridade ZIP e identificação da seção no envelope BU.
 - Registrar estado explícito para fuso, assinatura, possíveis substituições e reconciliação de contagens. Falhas de schema deixam contagens BU e divergências como indisponíveis; não presumem equivalência.
 
-O workflow manual fica em `.github/workflows/piloto-secao.yml`. Os originais e suas extrações JSON são publicados juntos, organizados por seção e pelo `idPleito` identificado no BU. A aplicação não faz coleta nacional nesta configuração.
+O workflow manual fica em `.github/workflows/piloto-secao.yml`. Cada execução coleta os conjuntos de dados `3220` e `3221` (primeiro e segundo turno), extrai cada aquisição separadamente e publica os originais e seus JSONs juntos sob `turno-1/` e `turno-2/`; os logs ficam em `logs/` na raiz da seção. A aplicação não faz coleta nacional nesta configuração.
 
 ## Fonte da amostra
 

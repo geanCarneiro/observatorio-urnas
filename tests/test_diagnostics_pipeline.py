@@ -153,6 +153,66 @@ class DiagnosticPipelineTests(unittest.TestCase):
             "counting_unit": "deduplicated normalized event records passed to session reconstruction",
         })
 
+    def test_suspension_assigned_null_vote_is_recognized_for_any_cargo(self):
+        cargo_labels = ["Governador", "Presidente", "Senador", "Deputado Federal"]
+        records = []
+        for index, cargo in enumerate(cargo_labels):
+            base = index * 3
+            records.extend([
+                f"25/10/2026 08:00:{base + 1:02d}\tx\tx\tx\tEleitor foi habilitado",
+                f"25/10/2026 08:00:{base + 2:02d}\tx\tx\tx\tAtribuido voto nulo por suspensão [{cargo}]",
+                f"25/10/2026 08:00:{base + 3:02d}\tx\tx\tx\tO voto do eleitor foi computado",
+            ])
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "log.zip"
+            with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("logd.dat", ("\n".join(records) + "\n").encode("latin-1"))
+            parsed = process_log_file(path, {"sha256": hashlib.sha256(path.read_bytes()).hexdigest()},
+                "es/56251/0034/0555", [])
+
+        expected_cargos = ["governador", "presidente", "senador", "deputado_federal"]
+        assigned = [event for event in parsed["events"] if event["event_type"].startswith(
+            "voto_nulo_atribuido_apos_suspensao_")]
+        self.assertEqual([event["cargo"] for event in assigned], expected_cargos)
+        self.assertEqual([event["cargo_label"] for event in assigned], cargo_labels)
+        self.assertTrue(all(event["recorded_vote_type"] == "null_after_suspension" for event in assigned))
+        self.assertTrue(all(event["message_raw"].startswith("Atribuido voto nulo por suspensão")
+                            for event in assigned))
+        self.assertEqual(parsed["event_counts"].get("evento_desconhecido_relevante", 0), 0)
+        self.assertEqual(parsed["voting_sessions"]["unassigned_event_count"], 0)
+        for cargo in expected_cargos:
+            self.assertEqual(parsed["voting_sessions"]["sessions"][expected_cargos.index(cargo)]
+                             ["cargo_computed_votes"][cargo][0]["recorded_vote_type"],
+                             "null_after_suspension")
+
+    def test_suspension_null_vote_by_cargo_reconciles_without_becoming_confirmation(self):
+        events = [
+            {"line_number": 1, "event_type": "habilitacao", "event_date": "2026-10-25",
+             "equipment_identifier": "device-hash"},
+            {"line_number": 2, "event_type": "voto_nulo_atribuido_apos_suspensao_governador",
+             "cargo": "governador", "event_date": "2026-10-25", "equipment_identifier": "device-hash",
+             "recorded_vote_type": "null_after_suspension"},
+            {"line_number": 3, "event_type": "suspensao", "event_date": "2026-10-25",
+             "equipment_identifier": "device-hash"},
+            {"line_number": 4, "event_type": "fim_sessao_votacao", "event_date": "2026-10-25",
+             "equipment_identifier": "device-hash"},
+        ]
+        sessions = reconstruct_voting_sessions(events)["sessions"]
+        bu = {"qtd_eleitores_compareceram": 1, "elections": [{"id_eleicao": 304, "results": [{"cargos": [
+            {"cargo_kind": "cargoConstitucional", "cargo": 3, "qtd_votos_bu": 1},
+        ]}]}]}
+        report = reconcile_log_metrics(events, sessions, bu, [], "2026-10-25")
+        governor = report["by_cargo"][0]
+        self.assertEqual(sessions[0]["cargo_confirmations"]["governador"], [])
+        self.assertEqual(sessions[0]["cargo_computed_votes"]["governador"][0]["recorded_vote_type"],
+                         "null_after_suspension")
+        self.assertEqual(governor["explicit_confirmation_count"], 0)
+        self.assertEqual(governor["suspension_assigned_null_vote_count"], 1)
+        self.assertEqual(governor["log_computed_vote_count"], 1)
+        self.assertEqual(governor["computed_vote_count_minus_bu"], 0)
+        self.assertEqual(governor["comparison_status"], "matched")
+        self.assertEqual(report["by_metric"]["votos_computados_por_cargo"]["governador"], 1)
+
     def test_log_accounting_distinguishes_raw_parseable_and_normalized_records(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "log.zip"

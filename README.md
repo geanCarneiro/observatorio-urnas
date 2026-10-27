@@ -54,6 +54,6 @@ dados/es/56251/0054/0509/
 
 Cada pasta de turno mantém a aquisição mais recente daquele turno. Uma nova coleta no mesmo diretório atualiza arquivos com o mesmo nome oficial; o `acquisition.json` registra a proveniência da versão presente. O Actions publica um artefato imutável por execução.
 
-O workflow **Piloto de coleta de seção** continua disponível para repetir uma única seção.
+O workflow **Piloto de coleta de seção** coleta os dois turnos de uma única seção em uma execução.
 
 Consulte `docs/` para a auditoria da referência, desenho de escala e evidências/limitações do piloto.

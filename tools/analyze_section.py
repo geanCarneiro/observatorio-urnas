@@ -55,7 +55,8 @@ ADMINISTRATIVE_EVENT_TYPES = {
     "comando_encerramento", "inicio_encerramento", "conclusao_encerramento",
 }
 INTERRUPTED_SESSION_STATUSES = {
-    "suspensa_sem_voto", "suspensa_com_voto_confirmado", "interrompida_por_falha", "interrompida_por_desligamento",
+    "suspensa_sem_voto", "suspensa_com_voto_confirmado", "suspensa_com_voto_atribuido",
+    "interrompida_por_falha", "interrompida_por_desligamento",
     "interrompida_por_inicializacao",
 }
 DEFAULT_CUTS = ("17:00", "17:15", "17:30", "17:45", "18:00", "18:30", "19:00")
@@ -114,6 +115,12 @@ def _event_type(message: str) -> str | None:
         cargo = _cargo_slug(confirmation.group(1))
         if cargo:
             return f"voto_confirmado_{cargo}"
+    suspension_null_vote = re.fullmatch(
+        r"atribuido voto nulo por suspensao \[([^\[\]]+)\]", normalized.strip())
+    if suspension_null_vote:
+        cargo = _cargo_slug(suspension_null_vote.group(1))
+        if cargo:
+            return f"voto_nulo_atribuido_apos_suspensao_{cargo}"
     for keyword, event_type in EVENT_KEYWORDS.items():
         if keyword in normalized:
             return event_type
@@ -131,6 +138,22 @@ def _is_cargo_confirmation(event_type: str | None) -> bool:
     return isinstance(event_type, str) and event_type.startswith("voto_confirmado_")
 
 
+def _is_suspension_assigned_null_vote(event_type: str | None) -> bool:
+    return isinstance(event_type, str) and event_type.startswith("voto_nulo_atribuido_apos_suspensao_")
+
+
+def _is_cargo_vote_event(event_type: str | None) -> bool:
+    return _is_cargo_confirmation(event_type) or _is_suspension_assigned_null_vote(event_type)
+
+
+def _cargo_from_vote_event_type(event_type: str) -> str:
+    if _is_cargo_confirmation(event_type):
+        return event_type.removeprefix("voto_confirmado_")
+    if _is_suspension_assigned_null_vote(event_type):
+        return event_type.removeprefix("voto_nulo_atribuido_apos_suspensao_")
+    return ""
+
+
 def _cargo_slug(label: str) -> str:
     normalized = _normalize_event_message(label)
     slug = re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
@@ -146,6 +169,12 @@ def _cargo_slug(label: str) -> str:
 def _cargo_confirmation_label(message: str) -> str | None:
     confirmation = re.fullmatch(r"\s*voto confirmado para \[([^\[\]]+)\]\s*", message, re.IGNORECASE)
     return confirmation.group(1).strip() if confirmation else None
+
+
+def _suspension_assigned_null_vote_label(message: str) -> str | None:
+    match = re.fullmatch(
+        r"\s*atribu[ií]do voto nulo por suspens[aã]o \[([^\[\]]+)\]\s*", message, re.IGNORECASE)
+    return match.group(1).strip() if match else None
 
 
 BU_CARGO_LABELS = {
@@ -171,7 +200,7 @@ def classify_unassigned_event(item: dict) -> dict:
         return {"classification": "session_termination_without_session", "reconciliation_relevant": True,
                 "reconciliation_impact": "blocking",
                 "classification_reason": "Session-ending event has no open habilitation to associate with its voting session."}
-    if event_type in VOTING_EVIDENCE_TYPES or _is_cargo_confirmation(event_type):
+    if event_type in VOTING_EVIDENCE_TYPES or _is_cargo_vote_event(event_type):
         return {"classification": "voting_evidence_without_session", "reconciliation_relevant": True,
                 "reconciliation_impact": "blocking",
                 "classification_reason": "Voting evidence without an associated habilitation can affect session and vote interpretation."}
@@ -185,8 +214,10 @@ def _interruption_classification(session: dict) -> tuple[str, dict | None]:
     if not state_events:
         return "incompleta_indeterminada", None
     classification = {
-        "suspensao": ("suspensa_com_voto_confirmado" if session.get("confirmation_events")
-                      else "suspensa_sem_voto"),
+        "suspensao": ("suspensa_com_voto_confirmado" if session.get("confirmation_events") else
+                      "suspensa_com_voto_atribuido" if any(
+                          _is_suspension_assigned_null_vote(item.get("event_type"))
+                          for item in session.get("computed_vote_events", [])) else "suspensa_sem_voto"),
         "falha": "interrompida_por_falha",
         "desligamento": "interrompida_por_desligamento",
         "reinicializacao": "interrompida_por_desligamento",
@@ -225,21 +256,28 @@ def reconstruct_voting_sessions(events: list[dict]) -> dict:
             "followed_by_session_end": bool(current["completed"]),
             "prior_confirmation_count": len(current["confirmation_events"]),
             "prior_confirmation_cargos": sorted({item.get("cargo") for item in current["confirmation_events"]}),
+            "prior_computed_vote_count": len(current["computed_vote_events"]),
+            "prior_computed_vote_cargos": sorted({item.get("cargo") for item in current["computed_vote_events"]}),
         } if lifecycle_type else None)
         current["outcome"] = ("completed_after_lifecycle_event" if current["completed"] and lifecycle_type
                                else "completed" if current["completed"]
                                else "interrupted" if lifecycle_type
                                else "incomplete")
         current["events_in_log_order"] = sorted(
-            [current["habilitation_event"], *current["confirmation_events"], *current["state_events"]]
+            [current["habilitation_event"], *current["computed_vote_events"], *current["state_events"]]
             + ([end_event] if end_event else []),
             key=lambda item: (item.get("line_number") is None, item.get("line_number") or 0))
         if status in INTERRUPTED_SESSION_STATUSES or status == "incompleta_indeterminada":
             current["interruption_classification"] = status
         cargos = {"governador", "presidente"}
         cargos.update(event["cargo"] for event in current["confirmation_events"])
+        cargos.update(event["cargo"] for event in current["computed_vote_events"])
         current["cargo_confirmations"] = {
             cargo: [event for event in current["confirmation_events"] if event["cargo"] == cargo]
+            for cargo in sorted(cargos)
+        }
+        current["cargo_computed_votes"] = {
+            cargo: [event for event in current["computed_vote_events"] if event["cargo"] == cargo]
             for cargo in sorted(cargos)
         }
         sessions.append(current)
@@ -263,12 +301,13 @@ def reconstruct_voting_sessions(events: list[dict]) -> dict:
                 "session_number": session_numbers[equipment],
                 "habilitation_event": event,
                 "confirmation_events": [],
+                "computed_vote_events": [],
                 "state_events": [],
                 "session_end_event": None,
             }
             if (previous and previous.get("state_events")
                     and previous.get("habilitation_event", {}).get("event_date") == event.get("event_date")
-                    and previous.get("confirmation_events")):
+                    and previous.get("computed_vote_events")):
                 current["possible_resumption"] = {
                     "classification": "retomada_indeterminada",
                     "possibility": "possible",
@@ -280,6 +319,8 @@ def reconstruct_voting_sessions(events: list[dict]) -> dict:
                         "prior_habilitation_line": previous["habilitation_event"].get("line_number"),
                         "prior_cargo_confirmation_lines": [item.get("line_number")
                             for item in previous["confirmation_events"]],
+                        "prior_computed_vote_lines": [item.get("line_number")
+                            for item in previous["computed_vote_events"]],
                         "interruption_line": (previous.get("end_event") or {}).get("line_number"),
                         "new_habilitation_line": event.get("line_number"),
                     },
@@ -294,7 +335,18 @@ def reconstruct_voting_sessions(events: list[dict]) -> dict:
                 unassigned.append({"reason": "confirmation_without_open_habilitation", "event": event})
             else:
                 cargo = event.get("cargo") or kind.removeprefix("voto_confirmado_")
-                current["confirmation_events"].append({**event, "cargo": cargo})
+                cargo_event = {**event, "cargo": cargo, "recorded_vote_type": "explicit_confirmation"}
+                current["confirmation_events"].append(cargo_event)
+                current["computed_vote_events"].append(cargo_event)
+                associated_event_count += 1
+        elif _is_suspension_assigned_null_vote(kind):
+            current = active_by_equipment.get(equipment)
+            if current is None:
+                unassigned.append({"reason": "suspension_vote_assignment_without_open_habilitation", "event": event})
+            else:
+                cargo = event.get("cargo") or _cargo_from_vote_event_type(kind)
+                current["computed_vote_events"].append({**event, "cargo": cargo,
+                    "recorded_vote_type": "null_after_suspension"})
                 associated_event_count += 1
         elif kind in SESSION_END_EVENT_TYPES:
             current = active_by_equipment.get(equipment)
@@ -346,7 +398,7 @@ def reconstruct_voting_sessions(events: list[dict]) -> dict:
                     == normalized_event_count),
                 "counting_unit": "deduplicated normalized event records passed to session reconstruction",
             },
-            "semantics": "Each explicit cargo confirmation is counted as a computed vote for that cargo. The event 'O voto do eleitor foi computado' marks the end of the voting session, not an additional cargo vote. Explicit lifecycle events classify interrupted sessions; an unassigned follow-up habilitation is recorded as a possible, indeterminate resumption without merging sessions."}
+            "semantics": "Each explicit cargo confirmation and each cargo-specific null-vote assignment after suspension is preserved as a separate computed-vote event for the indicated cargo. 'O voto do eleitor foi computado' marks session completion and is not an additional cargo vote. Suspension assignments are not reclassified as ordinary confirmations. An unassigned follow-up habilitation is recorded as a possible, indeterminate resumption without merging sessions."}
 
 
 def summarize_events_by_date(events: list[dict]) -> dict:
@@ -470,10 +522,18 @@ def reconcile_log_metrics(events: list[dict], sessions: list[dict], bu: dict,
                 rdv_by_cargo[key] = cargo.get("record_count")
 
     cargo_rows = []
-    confirmations_by_kind = {
-        kind.removeprefix("voto_confirmado_"): count for kind, count in event_counts.items()
-        if _is_cargo_confirmation(kind)
-    }
+    confirmations_by_kind = {}
+    suspension_null_votes_by_kind = {}
+    computed_votes_by_kind = {}
+    for kind, count in event_counts.items():
+        if not _is_cargo_vote_event(kind):
+            continue
+        cargo_name = _cargo_from_vote_event_type(kind)
+        computed_votes_by_kind[cargo_name] = computed_votes_by_kind.get(cargo_name, 0) + count
+        if _is_cargo_confirmation(kind):
+            confirmations_by_kind[cargo_name] = count
+        else:
+            suspension_null_votes_by_kind[cargo_name] = count
     unknown_blockers = sum(item.get("classification") == "potentially_relevant_unknown"
         and item.get("event", {}).get("event_date") == bu_date for item in (unassigned_events or []))
     for election in bu.get("elections", []):
@@ -487,51 +547,72 @@ def reconcile_log_metrics(events: list[dict], sessions: list[dict], bu: dict,
                     cargo_name = _cargo_slug(str(code))
                     cargo_kind = cargo.get("cargo_kind")
                 confirmation_count = event_counts.get(f"voto_confirmado_{cargo_name}", 0) if cargo_name else None
+                suspension_null_vote_count = (event_counts.get(
+                    f"voto_nulo_atribuido_apos_suspensao_{cargo_name}", 0) if cargo_name else None)
+                computed_vote_count = (confirmation_count + suspension_null_vote_count
+                    if confirmation_count is not None and suspension_null_vote_count is not None else None)
                 rdv_count = rdv_by_cargo.get((str(election.get("id_eleicao")), cargo_kind, str(code)))
                 bu_total = cargo.get("qtd_votos_bu")
                 rdv_bu = rdv_bu_by_cargo.get((str(election.get("id_eleicao")), cargo_kind, str(code)))
                 confirmations_by_kind[cargo_name or str(code)] = confirmation_count
+                computed_votes_by_kind[cargo_name or str(code)] = computed_vote_count
+                suspension_null_votes_by_kind[cargo_name or str(code)] = suspension_null_vote_count
                 available_totals = [value for value in (bu_total, rdv_count) if value is not None]
-                cargo_status = ("not_available" if confirmation_count is None or not available_totals else
+                cargo_status = ("not_available" if computed_vote_count is None or not available_totals else
                     "inconclusive" if unknown_blockers else
-                    "divergence" if any(confirmation_count != value for value in available_totals) else "matched")
+                    "divergence" if any(computed_vote_count != value for value in available_totals) else "matched")
                 lifecycle_context = []
                 if cargo_name:
                     for session in sessions:
                         if session.get("habilitation_event", {}).get("event_date") != bu_date:
                             continue
+                        computed_events = [item for item in session.get("computed_vote_events",
+                            session.get("confirmation_events", []))
+                            if item.get("cargo") == cargo_name and item.get("event_date") == bu_date]
+                        if not computed_events or not session.get("state_events"):
+                            continue
                         cargo_events = [item for item in session.get("confirmation_events", [])
                                         if item.get("cargo") == cargo_name and item.get("event_date") == bu_date]
-                        if not cargo_events or not session.get("state_events"):
-                            continue
+                        assigned_null_votes = [item for item in computed_events
+                            if item.get("recorded_vote_type") == "null_after_suspension"]
                         lifecycle_context.append({
                             "session_number": session.get("session_number"),
                             "equipment_identifier": session.get("equipment_identifier"),
                             "session_outcome": session.get("outcome", session.get("status")),
-                            "confirmation_count": len(cargo_events),
-                            "confirmation_lines": [item.get("line_number") for item in cargo_events],
+                            "computed_vote_count": len(computed_events),
+                            "explicit_confirmation_count": len(cargo_events),
+                            "explicit_confirmation_lines": [item.get("line_number") for item in cargo_events],
+                            "suspension_assigned_null_vote_count": len(assigned_null_votes),
+                            "suspension_assigned_null_vote_lines": [item.get("line_number")
+                                for item in assigned_null_votes],
                             "lifecycle_events": [{"event_type": item.get("event_type"),
                                 "line_number": item.get("line_number"),
                                 "event_timestamp_raw": item.get("event_timestamp_raw")}
                                 for item in session.get("state_events", [])],
                             "session_end_line": (session.get("session_end_event") or {}).get("line_number"),
                         })
-                lifecycle_confirmation_count = sum(item["confirmation_count"] for item in lifecycle_context)
+                lifecycle_confirmation_count = sum(item["explicit_confirmation_count"] for item in lifecycle_context)
+                lifecycle_computed_vote_count = sum(item["computed_vote_count"] for item in lifecycle_context)
                 cargo_rows.append({
                     "election_id": election.get("id_eleicao"), "cargo": cargo_name or code,
                     "explicit_confirmation_count": confirmation_count,
                     "log_computed_vote_confirmations": confirmation_count,
+                    "suspension_assigned_null_vote_count": suspension_null_vote_count,
+                    "log_computed_vote_count": computed_vote_count,
                     "confirmations_in_sessions_with_lifecycle_events": lifecycle_confirmation_count,
+                    "computed_votes_in_sessions_with_lifecycle_events": lifecycle_computed_vote_count,
                     "lifecycle_context": lifecycle_context,
                     "bu_vote_total": bu_total, "rdv_record_count": rdv_count,
                     "confirmation_count_minus_bu": confirmation_count - bu_total if confirmation_count is not None and bu_total is not None else None,
                     "confirmation_count_minus_rdv": confirmation_count - rdv_count if confirmation_count is not None and rdv_count is not None else None,
+                    "computed_vote_count_minus_bu": computed_vote_count - bu_total if computed_vote_count is not None and bu_total is not None else None,
+                    "computed_vote_count_minus_rdv": computed_vote_count - rdv_count if computed_vote_count is not None and rdv_count is not None else None,
                     "rdv_bu_reconciliation_status": rdv_bu.get("status") if rdv_bu else "not_available",
                     "rdv_minus_bu": rdv_bu.get("divergence_rdv_minus_bu") if rdv_bu else None,
                     "comparison_status": cargo_status,
                     "reason": ("Unclassified potentially relevant events prevent a complete cargo comparison." if cargo_status == "inconclusive" else
                         "No comparable BU/RDV cargo total is available." if cargo_status == "not_available" else
-                        "Log cargo confirmations are compared directly because each confirmation represents a computed vote; the session-end marker is counted separately. Lifecycle-event context is shown as evidence and does not remove confirmations or explain away a difference."),
+                        "Computed log votes by cargo combine explicit confirmations and cargo-specific null assignments after suspension. The two event categories remain separate; session-end markers do not add votes."),
                 })
     rdv_statuses = [comparison.get("status") for comparison in rdv_bu_by_cargo.values()]
     cargo_statuses = [row["comparison_status"] for row in cargo_rows]
@@ -557,6 +638,8 @@ def reconcile_log_metrics(events: list[dict], sessions: list[dict], bu: dict,
                 "reason": ("No timestamped log events were found on the BU election date." if not date_present else
                            "Some session-end events could not be assigned to reconstructed habilitation sessions." if session_end_count != len(completed_sessions) else None)},
             "votos_computados_confirmados_por_cargo": confirmations_by_kind,
+            "votos_nulos_atribuidos_apos_suspensao_por_cargo": suspension_null_votes_by_kind,
+            "votos_computados_por_cargo": computed_votes_by_kind,
             "votos_confirmados_exclusivamente_presidente": exclusive_presidential,
             "suspensoes": event_counts.get("suspensao", 0),
             "interrupcoes": event_counts.get("interrupcao", 0),
@@ -940,10 +1023,12 @@ def process_log_file(path: Path, metadata: dict, section: str, cuts: list[str]) 
             if cargo_label is not None:
                 event["cargo"] = _cargo_slug(cargo_label)
                 event["cargo_label"] = cargo_label
-            cargo_label = _cargo_confirmation_label(message)
-            if cargo_label is not None:
-                event["cargo"] = _cargo_slug(cargo_label)
+            elif event_type and _is_suspension_assigned_null_vote(event_type):
+                cargo_label = _suspension_assigned_null_vote_label(message)
+                event["cargo"] = _cargo_slug(cargo_label) if cargo_label else _cargo_from_vote_event_type(event_type)
                 event["cargo_label"] = cargo_label
+                event["recorded_vote_type"] = "null_after_suspension"
+                event["message_raw"] = message
             if event_type == "evento_desconhecido_relevante":
                 event["message_raw"] = message
                 event["parser_status"] = "potentially_relevant_unclassified"
@@ -951,7 +1036,7 @@ def process_log_file(path: Path, metadata: dict, section: str, cuts: list[str]) 
             counts[event_type] += 1
             event_date = timestamp.strftime("%Y-%m-%d")
             counts_by_date[event_date][event_type] += 1
-            if event_type == "habilitacao" or event_type == "fim_sessao_votacao" or _is_cargo_confirmation(event_type):
+            if event_type == "habilitacao" or event_type == "fim_sessao_votacao" or _is_cargo_vote_event(event_type):
                 for cut in cuts:
                     if hhmm >= cut:
                         key = f"{event_type}_a_partir_de_{cut.replace(':', 'h')}"
