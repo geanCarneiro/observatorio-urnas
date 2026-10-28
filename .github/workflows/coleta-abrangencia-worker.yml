@@ -1,0 +1,135 @@
+name: Coleta por abrangência - worker
+run-name: coleta-plan-${{ inputs.plan_run_id }}-shard-${{ inputs.shard_index }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      plan_run_id:
+        description: Execução que contém o plano e inventário imutáveis
+        type: string
+        required: true
+      shard_index:
+        description: Índice do grupo de até 100 lotes
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  carregar-plano:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Baixar plano e inventário imutáveis
+        uses: actions/download-artifact@v4
+        with:
+          name: coleta-plano-${{ inputs.plan_run_id }}
+          run-id: ${{ inputs.plan_run_id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: worker-input
+      - name: Preparar somente os inventários deste worker
+        env:
+          SHARD_INDEX: ${{ inputs.shard_index }}
+        run: |
+          python tools/prepare_worker_inputs.py --plan worker-input/coleta-plan.json \
+            --inventory-root worker-input --output worker-shard \
+            --shard-index "$SHARD_INDEX"
+      - name: Criar matriz limitada a 100 lotes
+        id: matrix
+        env:
+          SHARD_INDEX: ${{ inputs.shard_index }}
+        run: |
+          python tools/render_worker_matrix.py --plan worker-shard/worker-plan.json \
+            --shard-index "$SHARD_INDEX" > matrix.json
+          echo "value=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
+      - name: Publicar pacote interno deste worker
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker-input-${{ github.run_id }}-${{ inputs.shard_index }}
+          path: worker-shard/
+          if-no-files-found: error
+          retention-days: 90
+
+  coletar:
+    needs: carregar-plano
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix: ${{ fromJSON(needs.carregar-plano.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Baixar apenas os inventários deste worker
+        uses: actions/download-artifact@v4
+        with:
+          name: worker-input-${{ github.run_id }}-${{ inputs.shard_index }}
+          path: worker-input
+      - name: Instalar dependências
+        run: python -m pip install -r requirements.txt
+      - name: Coletar lote de até 1.000 seções
+        id: collect
+        continue-on-error: true
+        run: |
+          python tools/collect_sections.py \
+            --sections "worker-input/${{ matrix.inventory_path }}" \
+            --data-id "${{ matrix.data_id }}" --offset "${{ matrix.offset }}" \
+            --limit "${{ matrix.limit }}" --output dados > batch-report.json
+      - name: Extrair arquivos dos downloads concluídos
+        id: extract
+        if: ${{ always() && steps.collect.outcome != 'skipped' }}
+        continue-on-error: true
+        run: |
+          ARGS=()
+          while IFS= read -r acquisition; do ARGS+=(--acquisition "$acquisition"); done < <(find dados -name acquisition.json -type f | sort)
+          if ((${#ARGS[@]})); then python tools/extract_section_data.py "${ARGS[@]}"; fi
+      - name: Separar o lote em artefatos de até 500 seções
+        id: stage
+        if: ${{ always() && steps.collect.outcome != 'skipped' }}
+        continue-on-error: true
+        run: |
+          python tools/stage_batch_artifacts.py \
+            --inventory "worker-input/${{ matrix.inventory_path }}" --data-root dados \
+            --report batch-report.json --offset "${{ matrix.offset }}" \
+            --limit "${{ matrix.limit }}" --part-size 500 --output staged
+      - name: Publicar primeira metade do lote
+        if: ${{ always() && steps.stage.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: dados-lote-${{ matrix.batch_id }}-parte-1
+          path: staged/part-00/
+          if-no-files-found: warn
+          retention-days: 90
+          overwrite: true
+      - name: Publicar segunda metade do lote
+        if: ${{ always() && steps.stage.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: dados-lote-${{ matrix.batch_id }}-parte-2
+          path: staged/part-01/
+          if-no-files-found: ignore
+          retention-days: 90
+          overwrite: true
+      - name: Validar resultado do lote
+        if: ${{ always() }}
+        env:
+          COLLECTOR_OUTCOME: ${{ steps.collect.outcome }}
+          EXTRACT_OUTCOME: ${{ steps.extract.outcome }}
+          STAGE_OUTCOME: ${{ steps.stage.outcome }}
+        run: |
+          if [[ "$EXTRACT_OUTCOME" != "success" || "$STAGE_OUTCOME" != "success" ]]; then
+            echo "Falha ao extrair arquivos ou preparar artefatos: extract=$EXTRACT_OUTCOME stage=$STAGE_OUTCOME"
+            exit 1
+          fi
+          python tools/check_batch_report.py --report batch-report.json --collector-outcome "$COLLECTOR_OUTCOME"

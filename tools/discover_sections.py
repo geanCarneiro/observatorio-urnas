@@ -23,7 +23,6 @@ BASE_URL = "https://resultados.tse.jus.br/oficial/ele2026/arquivo-urna/{config_i
 TERRITORIES = (
     "ac al ap am ba ce df es zz go ma mt ms mg pr pb pa pe pi rj rn rs ro rr sc se sp to"
 ).split()
-MAX_LIMIT = 5000
 
 
 def normalize_filter_values(value: str | list[str] | tuple[str, ...] | None, width: int,
@@ -147,13 +146,13 @@ def classify_discovery_error(error: Exception) -> tuple[str, str]:
 def discover(*, config_id: str, output: Path, uf: str | list[str] | None = None,
              municipio: str | list[str] | None = None, zona: str | list[str] | None = None,
              secao: str | list[str] | None = None, offset: int = 0,
-             limit: int = 100, ufs: list[str] | None = None) -> dict:
+             limit: int | None = None, ufs: list[str] | None = None) -> dict:
     if not re.fullmatch(r"\d{4}", config_id):
         raise ValueError("config-id must contain exactly four digits")
     if offset < 0:
         raise ValueError("offset must be zero or greater")
-    if not 1 <= limit <= MAX_LIMIT:
-        raise ValueError(f"limit must be between 1 and {MAX_LIMIT}")
+    if limit is not None and limit < 1:
+        raise ValueError("limit must be positive when provided")
     uf_values = normalize_filter_values(uf, 2, "uf", lowercase=True)
     municipality_values = normalize_filter_values(municipio, 5, "municipio")
     zone_values = normalize_filter_values(zona, 4, "zona")
@@ -248,7 +247,7 @@ def discover(*, config_id: str, output: Path, uf: str | list[str] | None = None,
                      "zona": zone_values, "secao": section_values}
     matching = filter_sections(records, **filter_values)
     filters = {key: _report_filter(values) for key, values in filter_values.items()}
-    page = matching[offset:offset + limit]
+    page = matching[offset:] if limit is None else matching[offset:offset + limit]
     matching_counts = aggregation_counts(matching)
     selected_counts = aggregation_counts(page)
     page_bytes = json.dumps(page, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -292,7 +291,8 @@ def main() -> int:
     parser.add_argument("--zona", help="comma-separated zones, retaining leading zeroes")
     parser.add_argument("--secao", help="comma-separated sections, retaining leading zeroes")
     parser.add_argument("--offset", type=int, default=0, help="stable sorted page offset")
-    parser.add_argument("--limit", type=int, default=100, help=f"maximum selected sections (1..{MAX_LIMIT})")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="maximum selected sections (omit to select all matching sections)")
     parser.add_argument("--output", type=Path, default=Path("inventario"))
     args = parser.parse_args()
     try:

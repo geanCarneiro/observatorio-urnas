@@ -21,13 +21,13 @@ python tools/discover_sections.py --uf es --municipio 56251 --zona 0054 --limit 
 python tools/discover_sections.py --uf "es, mg" --municipio "56251, 41009" \
   --zona "0054, 0050" --secao "0509, 0224" --limit 100
 
-# Descubra até 5.000 seções; depois colete uma faixa de até 100
-python tools.discover_sections.py --limit 5000 --offset 0
+# Descubra todo o inventário correspondente; `--limit` é opcional
+python tools.discover_sections.py --offset 0
 python tools/collect_sections.py --sections inventario/section-inventory.json --data-id 3221 \
-  --offset 0 --limit 100 --output dados
+  --offset 0 --limit 1000 --output dados
 ```
 
-`--config-id` escolhe o catálogo de seções e `--data-id` escolhe a base dos manifestos por seção. Para as Eleições 2026 observadas aqui, `3220` corresponde ao primeiro turno e `3221` ao segundo; os identificadores e datas da fonte são preservados nos artefatos. A descoberta seleciona até 5.000 seções por turno; a coleta processa faixas de até 100. Para seções específicas, prefira os filtros geográficos, que são mais estáveis do que paginação enquanto o catálogo oficial muda.
+`--config-id` escolhe o catálogo de seções e `--data-id` escolhe a base dos manifestos por seção. Para as Eleições 2026 observadas aqui, `3220` corresponde ao primeiro turno e `3221` ao segundo; os identificadores e datas da fonte são preservados nos artefatos. Sem `--limit`, a descoberta seleciona todas as seções correspondentes. O coletor em lote aceita até 1.000 seções por job. Para seções específicas, prefira os filtros geográficos, que são mais estáveis do que paginação enquanto o catálogo oficial muda.
 
 ## Rodar o piloto de Cariacica
 
@@ -42,7 +42,11 @@ Os originais e seus JSONs estruturados ficam juntos sob `dados/`, ignorado pelo 
 
 ## GitHub Actions
 
-Na aba **Actions**, escolha **Coleta por abrangência** e o turno (`1`, `2` ou `ambos`). UF, município, zona e seção aceitam listas de códigos separadas por vírgula, com espaços opcionais. Os filtros são cumulativos e obedecem à hierarquia: município exige UF, zona exige município, e seção exige zona. Cada código filho precisa existir dentro do conjunto dos pais escolhidos; a validação ocorre durante a descoberta, antes de gerar jobs de coleta. Campos vazios ampliam o escopo dentro do filtro pai. `offset` e `max_secoes` definem a página selecionada, com até 5.000 seções por turno; o workflow divide a página em faixas de até 100 e executa um job independente e sequencial para cada faixa. Cada job tem timeout próprio de 180 minutos, e os arquivos das faixas concluídas são reunidos em um artefato final por 90 dias. O workflow é manual.
+Na aba **Actions**, escolha **Coleta por abrangência** e a operação (`nova` ou `retomar`). Em uma nova coleta, escolha o turno (`1`, `2` ou `ambos`). UF, município, zona e seção aceitam listas de códigos separadas por vírgula, com espaços opcionais. Os filtros são cumulativos e obedecem à hierarquia: município exige UF, zona exige município, e seção exige zona. Cada código filho precisa existir dentro do conjunto dos pais escolhidos; a validação ocorre durante a descoberta, antes de gerar jobs de coleta. Campos vazios ampliam o escopo dentro do filtro pai. `offset` seleciona o início da página; `max_secoes` é opcional e, quando vazio, coleta toda a abrangência filtrada por turno.
+
+O workflow principal preserva o inventário e o plano em `coleta-plano-<run_id>` e registra os links dos workers em `coleta-index-<run_id>`. A coleta é executada nos worker runs: cada job processa até 1.000 seções, worker runs têm até 100 jobs e executam até 10 em paralelo. O GitHub mantém jobs excedentes na fila conforme a capacidade de runners da conta. Cada job publica artefatos separados de até 500 seções, mantidos por 90 dias; não é criado um ZIP nacional consolidado. O workflow principal termina após disparar os workers; acompanhe a conclusão e falhas nos worker runs listados no índice. Cada job tem timeout de 180 minutos.
+
+Para retomar, selecione `retomar` e informe em `run_id_origem` o ID da execução original. O workflow consulta os worker runs registrados no índice daquela execução: jobs concluídos com sucesso são ignorados, jobs ainda ativos não são duplicados e somente jobs falhados são reexecutados. Se tudo já terminou com sucesso, a retomada não baixa os dados novamente. Para obter uma captura nova, inicie uma operação `nova`.
 
 Cada seção fica sob `dados/<uf>/<municipio>/<zona>/<secao>/`. A coleta organiza BU e RDV em `turno-1/` ou `turno-2/`, usando o `idPleito` extraído do BU; o log fica na pasta `logs/` da seção e os eventos têm um JSON extraído ao lado do original. Os JSONs de BU e RDV também ficam ao lado dos arquivos originais. `acquisition.json` preserva URL, hashes, estado e proveniência da aquisição. Um `vota.vsc` listado no manifesto é registrado como não aplicável e não é baixado. O JSON do log preserva cada evento e seu timestamp, sem faixas horárias, contagens consolidadas ou relatório paralelo.
 

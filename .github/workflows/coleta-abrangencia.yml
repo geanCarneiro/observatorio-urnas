@@ -3,15 +3,23 @@ name: Coleta por abrangência
 on:
   workflow_dispatch:
     inputs:
+      operacao:
+        description: Nova coleta ou retomada de uma execução anterior
+        type: choice
+        required: true
+        default: nova
+        options: [nova, retomar]
+      run_id_origem:
+        description: ID da execução original (obrigatório para retomar)
+        type: string
+        required: false
+        default: ''
       turno:
         description: Turno eleitoral a coletar
         type: choice
         required: true
         default: '2'
-        options:
-          - '1'
-          - '2'
-          - ambos
+        options: ['1', '2', ambos]
       uf:
         description: UFs separadas por vírgula (vazio para todas as UFs e exterior)
         type: string
@@ -38,45 +46,53 @@ on:
         required: true
         default: 0
       max_secoes:
-        description: Máximo por turno nesta execução (1 a 5000; processado em faixas de até 100)
-        type: number
-        required: true
-        default: 100
+        description: Máximo opcional por turno; vazio coleta toda a abrangência selecionada
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
-
-concurrency:
-  group: coleta-abrangencia-${{ inputs.turno }}-${{ inputs.uf || 'br' }}-${{ inputs.municipio || 'todos' }}-${{ inputs.zona || 'todas' }}-${{ inputs.secao || 'todas' }}-${{ inputs.offset }}
-  cancel-in-progress: false
+  actions: write
 
 jobs:
-  descobrir-inventario:
+  preparar-e-orquestrar:
     runs-on: ubuntu-latest
     timeout-minutes: 180
-    outputs:
-      batch_matrix: ${{ steps.batches.outputs.matrix }}
-      batch_count: ${{ steps.batches.outputs.count }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Validar faixa solicitada
+      - name: Instalar dependências
+        run: python -m pip install -r requirements.txt
+      - name: Validar parâmetros da nova coleta
+        if: ${{ inputs.operacao == 'nova' }}
         env:
           LIMIT: ${{ inputs.max_secoes }}
           OFFSET: ${{ inputs.offset }}
         run: |
           python - <<'PY'
           import os
-          limit=int(os.environ['LIMIT'])
-          offset=int(os.environ['OFFSET'])
-          if not 1 <= limit <= 5000: raise SystemExit('max_secoes precisa estar entre 1 e 5000 por turno')
-          if offset < 0: raise SystemExit('offset não pode ser negativo')
+          offset = int(os.environ['OFFSET'])
+          limit = os.environ['LIMIT'].strip()
+          if offset < 0:
+              raise SystemExit('offset não pode ser negativo')
+          if limit and int(limit) < 1:
+              raise SystemExit('max_secoes precisa ser positivo quando informado')
           PY
-      - name: Instalar dependências
-        run: python -m pip install -r requirements.txt
-      - name: Descobrir seleções do catálogo por turno
+      - name: Validar ID da execução a retomar
+        if: ${{ inputs.operacao == 'retomar' }}
+        env:
+          SOURCE_RUN_ID: ${{ inputs.run_id_origem }}
+        run: |
+          python - <<'PY'
+          import os, re
+          if not re.fullmatch(r'[0-9]+', os.environ['SOURCE_RUN_ID']):
+              raise SystemExit('informe run_id_origem numérico para retomar')
+          PY
+      - name: Descobrir inventário completo da abrangência
+        if: ${{ inputs.operacao == 'nova' }}
         env:
           TURNO: ${{ inputs.turno }}
           UF: ${{ inputs.uf }}
@@ -90,128 +106,78 @@ jobs:
           for TURNO_ATUAL in "${TURNOS[@]}"; do
             if [[ "$TURNO_ATUAL" == 1 ]]; then CONFIG_ID=3220; else CONFIG_ID=3221; fi
             DEST="inventario/turno${TURNO_ATUAL}"
-            ARGS=(--config-id "$CONFIG_ID" --offset "$OFFSET" --limit "$LIMIT" --output "$DEST")
+            ARGS=(--config-id "$CONFIG_ID" --offset "$OFFSET" --output "$DEST")
+            if [[ -n "$LIMIT" ]]; then ARGS+=(--limit "$LIMIT"); fi
             if [[ -n "$UF" ]]; then ARGS+=(--uf "$UF"); fi
             if [[ -n "$MUNICIPIO" ]]; then ARGS+=(--municipio "$MUNICIPIO"); fi
             if [[ -n "$ZONA" ]]; then ARGS+=(--zona "$ZONA"); fi
             if [[ -n "$SECAO" ]]; then ARGS+=(--secao "$SECAO"); fi
             python tools/discover_sections.py "${ARGS[@]}" > /dev/null
           done
-      - name: Dividir a seleção em faixas de até 100 seções
-        id: batches
-        env:
-          TURNO: ${{ inputs.turno }}
-          BASE_OFFSET: ${{ inputs.offset }}
-        run: |
-          python - <<'PY' >> "$GITHUB_OUTPUT"
-          import json, os
-          from pathlib import Path
-          turns = ("1", "2") if os.environ["TURNO"] == "ambos" else (os.environ["TURNO"],)
-          base_offset = int(os.environ["BASE_OFFSET"])
-          batches = []
-          for turn in turns:
-              inventory = json.loads(Path(f"inventario/turno{turn}/section-inventory.json").read_text())
-              selected = len(inventory["sections"])
-              for local_offset in range(0, selected, 100):
-                  count = min(100, selected - local_offset)
-                  range_start = base_offset + local_offset
-                  batches.append({"turno": turn, "data_id": "3220" if turn == "1" else "3221",
-                      "offset": local_offset, "range_start": range_start, "range_end": range_start + count,
-                      "limit": count})
-          if not batches:
-              raise SystemExit("Nenhuma seção foi selecionada pelo inventário e filtros informados.")
-          print("matrix=" + json.dumps({"include": batches}, separators=(",", ":")))
-          print("count=" + str(len(batches)))
-          PY
-      - name: Preparar inventário para os jobs de faixa
-        run: |
-          mkdir -p artifact-content/inventario
-          cp -a inventario/. artifact-content/inventario/
-      - name: Publicar inventário selecionado
+          if [[ "$TURNO" == "ambos" ]]; then TURNOS_CSV=1,2; else TURNOS_CSV="$TURNO"; fi
+          python tools/plan_collection.py --inventory-dir inventario --turns "$TURNOS_CSV" \
+            --batch-size 1000 --jobs-per-worker 100 --output coleta-plan.json
+      - name: Publicar plano imutável da coleta
+        if: ${{ inputs.operacao == 'nova' }}
         uses: actions/upload-artifact@v4
         with:
-          name: inventario-selecionado
-          path: artifact-content/
-          if-no-files-found: error
-          retention-days: 90
-
-  coletar-faixas:
-    needs: descobrir-inventario
-    if: ${{ needs.descobrir-inventario.outputs.batch_count != '0' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
-    strategy:
-      fail-fast: false
-      max-parallel: 5
-      matrix: ${{ fromJSON(needs.descobrir-inventario.outputs.batch_matrix) }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Instalar dependências
-        run: python -m pip install -r requirements.txt
-      - name: Baixar inventário desta execução
-        uses: actions/download-artifact@v4
-        with:
-          name: inventario-selecionado
-          path: .
-      - name: Coletar esta faixa
-        run: |
-          python tools/collect_sections.py \
-            --sections "inventario/turno${{ matrix.turno }}/section-inventory.json" \
-            --data-id "${{ matrix.data_id }}" --offset "${{ matrix.offset }}" \
-            --limit "${{ matrix.limit }}" --output dados
-      - name: Extrair arquivos sem agregação por faixa horária
-        run: |
-          ARGS=()
-          while IFS= read -r acquisition; do ARGS+=(--acquisition "$acquisition"); done < <(find dados -name acquisition.json -type f | sort)
-          if ((${#ARGS[@]})); then python tools/extract_section_data.py "${ARGS[@]}"; fi
-      - name: Preparar artefato da faixa
-        run: |
-          mkdir -p artifact-content/dados
-          cp -a dados/. artifact-content/dados/
-      - name: Publicar faixa
-        uses: actions/upload-artifact@v4
-        with:
-          name: dados-lote-turno${{ matrix.turno }}-${{ matrix.range_start }}-${{ matrix.range_end }}
-          path: artifact-content/
-          if-no-files-found: error
-          retention-days: 90
-
-  montar-arquivo-final:
-    needs: [descobrir-inventario, coletar-faixas]
-    if: ${{ always() && needs.descobrir-inventario.result == 'success' && needs.coletar-faixas.result != 'cancelled' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - name: Baixar inventário selecionado
-        uses: actions/download-artifact@v4
-        with:
-          name: inventario-selecionado
-          path: .
-      - name: Reunir arquivos das faixas concluídas
-        uses: actions/download-artifact@v4
-        with:
-          pattern: dados-lote-*
-          path: lotes
-          merge-multiple: true
-      - name: Montar árvore final
-        run: |
-          mkdir -p dados
-          if [[ -d lotes/dados ]]; then cp -a lotes/dados/. dados/; fi
-      - name: Registrar resultados da coleta no inventário
-        run: |
-          for inventory in inventario/turno*/section-inventory.json; do
-            python tools/update_inventory_collection_status.py --inventory "$inventory" --data-root dados
-          done
-      - name: Publicar coleta organizada
-        uses: actions/upload-artifact@v4
-        with:
-          name: dados-turno-${{ inputs.turno }}-${{ inputs.uf || 'br' }}-${{ inputs.municipio || 'todos' }}-${{ inputs.zona || 'todas' }}-${{ inputs.secao || 'todas' }}-offset-${{ inputs.offset }}-max-${{ inputs.max_secoes }}
+          name: coleta-plano-${{ github.run_id }}
           path: |
+            coleta-plan.json
             inventario/
-            dados/
           if-no-files-found: error
           retention-days: 90
+      - name: Baixar índice da execução original
+        if: ${{ inputs.operacao == 'retomar' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: coleta-index-${{ inputs.run_id_origem }}
+          run-id: ${{ inputs.run_id_origem }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: resume-source
+      - name: Baixar plano original da execução
+        if: ${{ inputs.operacao == 'retomar' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: coleta-plano-${{ inputs.run_id_origem }}
+          run-id: ${{ inputs.run_id_origem }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: resume-source-plan
+      - name: Copiar índice para esta retomada
+        if: ${{ inputs.operacao == 'retomar' }}
+        run: cp resume-source/coleta-index.json coleta-index.json
+      - name: Disparar worker runs da nova coleta
+        id: dispatch
+        if: ${{ inputs.operacao == 'nova' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python tools/orchestrate_collection.py dispatch --plan coleta-plan.json \
+            --parent-run-id "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --ref "$GITHUB_REF_NAME" --index coleta-index.json
+      - name: Retomar somente os worker jobs falhados
+        id: resume
+        if: ${{ inputs.operacao == 'retomar' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python tools/orchestrate_collection.py resume --index coleta-index.json \
+          --plan resume-source-plan/coleta-plan.json --repo "$GITHUB_REPOSITORY"
+      - name: Publicar índice de execução e workers
+        if: ${{ always() && hashFiles('coleta-index.json') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: coleta-index-${{ github.run_id }}
+          path: coleta-index.json
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: true
+      - name: Reportar falha ao disparar workers
+        if: ${{ always() && steps.dispatch.outcome == 'failure' }}
+        run: exit 1
+      - name: Reportar falha ao retomar workers
+        if: ${{ always() && steps.resume.outcome == 'failure' }}
+        run: exit 1

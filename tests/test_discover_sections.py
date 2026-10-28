@@ -178,6 +178,17 @@ class DiscoverSectionsTests(unittest.TestCase):
                 discover(config_id="3220", output=Path(temp), municipio="56251")
             fetch_catalog.assert_not_called()
 
+    def test_discovery_without_limit_selects_more_than_previous_5000_ceiling(self):
+        sections = [{"ns": f"{number:04d}"} for number in range(5001)]
+        payload = {"cdp": "3220", "abr": [{"cd": "es", "mu": [{"cd": "56251", "nm": "CARIACICA",
+            "zon": [{"cd": "0054", "sec": sections}]}]}]}
+        raw = jws(payload)
+        with tempfile.TemporaryDirectory() as temp, patch("discover_sections.fetch", return_value=(raw, {"status": "200"})):
+            result = discover(config_id="3220", output=Path(temp), uf="es")
+        self.assertEqual(result["matching_section_count"], 5001)
+        self.assertEqual(result["selection"]["selected_count"], 5001)
+        self.assertIsNone(result["selection"]["limit"])
+
 
 if __name__ == "__main__":
     unittest.main()

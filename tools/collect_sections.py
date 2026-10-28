@@ -12,7 +12,7 @@ from pathlib import Path
 from diagnostics import diagnostic, summarize_diagnostics
 from section_aggregation import is_aggregated
 
-MAX_BATCH_SIZE = 100
+MAX_BATCH_SIZE = 1000
 
 def collect_sections(sections: list[dict], output_root: Path, runner=subprocess.run, data_id: str = "3221",
                     offset: int = 0, limit: int = MAX_BATCH_SIZE) -> dict:
