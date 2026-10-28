@@ -7,7 +7,7 @@ from unittest.mock import patch, Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from check_batch_report import validate_batch_report
-from orchestrate_collection import dispatch_plan, resume_index
+from orchestrate_collection import _gh_json, dispatch_plan, resume_index
 from plan_collection import build_plan, failed_batch_ids, retain_batches
 from prepare_worker_inputs import prepare_worker_inputs
 from render_worker_matrix import shard_matrix
@@ -15,6 +15,21 @@ from stage_batch_artifacts import stage_parts
 
 
 class CollectionOrchestrationTests(unittest.TestCase):
+    def test_gh_json_forces_get_when_query_fields_are_present(self):
+        response = Mock(returncode=0, stdout='{"workflow_runs": []}', stderr="")
+        with patch("orchestrate_collection.subprocess.run", return_value=response) as gh_run:
+            payload = _gh_json([
+                "repos/owner/repo/actions/workflows/worker.yml/runs",
+                "-f", "event=workflow_dispatch", "-f", "per_page=100",
+            ])
+
+        self.assertEqual(payload, {"workflow_runs": []})
+        self.assertEqual(gh_run.call_args.args[0], [
+            "gh", "api", "--method", "GET",
+            "repos/owner/repo/actions/workflows/worker.yml/runs",
+            "-f", "event=workflow_dispatch", "-f", "per_page=100",
+        ])
+
     def test_plan_partitions_unbounded_selection_into_bounded_worker_shards(self):
         sections = [{"uf": "es", "municipio": "56251", "zona": "0054", "secao": f"{i:04d}"}
                     for i in range(1, 250_501)]

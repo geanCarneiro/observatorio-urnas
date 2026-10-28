@@ -11,7 +11,11 @@ from pathlib import Path
 
 
 def _gh_json(args: list[str]) -> dict:
-    result = subprocess.run(["gh", "api", *args], capture_output=True, text=True, check=False)
+    # Every call routed through this helper is a read. gh api otherwise defaults
+    # to POST when -f fields are present, which makes the workflow-runs lookup
+    # endpoint return 404 after a successful worker dispatch.
+    result = subprocess.run(["gh", "api", "--method", "GET", *args],
+                            capture_output=True, text=True, check=False)
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or "gh api failed")
     return json.loads(result.stdout)
