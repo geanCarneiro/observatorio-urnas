@@ -20,6 +20,9 @@ from urllib.parse import quote
 from datetime import datetime, timezone
 from pathlib import Path
 
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from diagnostics import diagnostic, file_state, verify_jws_signature
 from election_turns import folder_for_pleito
 
@@ -28,11 +31,42 @@ USER_AGENT = "observatorio-urnas/0.1 (section-level research collection)"
 MAX_BYTES = 64 * 1024 * 1024
 
 
-def fetch(url: str) -> tuple[bytes, dict[str, str]]:
+class NetworkAccessDeniedError(ConnectionError):
+    """Raised when Windows or the execution environment blocks outbound sockets."""
+
+
+def _is_network_access_denied(error: BaseException) -> bool:
+    pending = [error]
+    seen = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if getattr(current, "winerror", None) == 10013 or getattr(current, "errno", None) == 10013:
+            return True
+        if "winerror 10013" in str(current).lower():
+            return True
+        for attribute in ("reason", "__cause__", "__context__"):
+            nested = getattr(current, attribute, None)
+            if isinstance(nested, BaseException):
+                pending.append(nested)
+    return False
+
+
+def fetch(url: str, *, cached_body: bytes | None = None,
+          cached_metadata: dict[str, str] | None = None,
+          progress_callback=None) -> tuple[bytes, dict[str, str]]:
     last_partial = b""
     last_metadata = None
     for attempt in range(6):
-        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        headers = {"User-Agent": USER_AGENT}
+        if cached_body is not None and cached_metadata:
+            if cached_metadata.get("etag"):
+                headers["If-None-Match"] = cached_metadata["etag"]
+            if cached_metadata.get("last_modified"):
+                headers["If-Modified-Since"] = cached_metadata["last_modified"]
+        request = urllib.request.Request(url, headers=headers)
         data = bytearray()
         try:
             with urllib.request.urlopen(request, timeout=45) as response:
@@ -43,8 +77,12 @@ def fetch(url: str) -> tuple[bytes, dict[str, str]]:
                     "content_length": response.headers.get("Content-Length", ""),
                     "last_modified": response.headers.get("Last-Modified", ""),
                     "etag": response.headers.get("ETag", ""),
+                    "cache_status": "downloaded",
                 }
                 last_metadata = metadata
+                content_length = metadata["content_length"]
+                if progress_callback:
+                    progress_callback(0, int(content_length) if content_length.isdigit() else None)
                 while True:
                     try:
                         chunk = response.read(min(1024 * 1024, MAX_BYTES + 1 - len(data)))
@@ -57,6 +95,8 @@ def fetch(url: str) -> tuple[bytes, dict[str, str]]:
                     if not chunk:
                         break
                     data.extend(chunk)
+                    if progress_callback:
+                        progress_callback(len(data), int(content_length) if content_length.isdigit() else None)
                     if len(data) > MAX_BYTES:
                         raise DownloadIncompleteError(f"response exceeds {MAX_BYTES} bytes", bytes(data[:MAX_BYTES]), metadata)
                 if metadata["content_length"].isdigit() and int(metadata["content_length"]) != len(data):
@@ -65,6 +105,15 @@ def fetch(url: str) -> tuple[bytes, dict[str, str]]:
                     )
                 return bytes(data), metadata
         except urllib.error.HTTPError as error:
+            if error.code == 304 and cached_body is not None:
+                metadata = dict(cached_metadata or {})
+                metadata.update({"status": "304", "url": url, "cache_status": "revalidated"})
+                if error.headers.get("ETag"):
+                    metadata["etag"] = error.headers["ETag"]
+                if error.headers.get("Last-Modified"):
+                    metadata["last_modified"] = error.headers["Last-Modified"]
+                error.close()
+                return cached_body, metadata
             if error.code not in (429, 503) or attempt == 5:
                 raise
             retry_after = error.headers.get("Retry-After", "")
@@ -76,6 +125,12 @@ def fetch(url: str) -> tuple[bytes, dict[str, str]]:
                 raise DownloadIncompleteError(f"HTTP body ended early: {error}", last_partial, last_metadata) from error
             time.sleep(min(60, 2**attempt))
         except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as error:
+            if _is_network_access_denied(error):
+                raise NetworkAccessDeniedError(
+                    "O Windows bloqueou a conexão de saída (WinError 10013). "
+                    "O processo que executa a coleta não tem permissão para acessar a rede. "
+                    "Confira a política de rede/firewall e execute a UI/CLI em um ambiente com acesso externo."
+                ) from error
             if data:
                 last_partial = bytes(data)
             if attempt == 5:
@@ -105,6 +160,56 @@ def save_atomic(path: Path, data: bytes) -> None:
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def complete_existing_acquisition(section_root: Path, section_key: str, data_id: str) -> Path | None:
+    """Return a complete local acquisition for this section and dataset, if present."""
+    turn_directory = folder_for_pleito(data_id)
+    acquisition_path = section_root / turn_directory / "acquisition.json"
+    if not acquisition_path.is_file():
+        return None
+    try:
+        acquisition = json.loads(acquisition_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if (acquisition.get("section_key") != section_key
+            or str(acquisition.get("data_id")) != str(data_id)
+            or acquisition.get("turn_directory") != turn_directory):
+        return None
+
+    core_states = [state for state in acquisition.get("file_states", [])
+                   if state.get("type") in {"bu", "rdv", "log"}]
+    if not core_states or any(state.get("status") != "downloaded" for state in core_states):
+        return None
+    if not all(any(state.get("type") == kind for state in core_states) for kind in ("bu", "rdv", "log")):
+        return None
+
+    manifest_path = acquisition_path.parent / "manifest.aux.jws"
+    if not manifest_path.is_file():
+        return None
+    expected_manifest_hash = acquisition.get("manifest_sha256")
+    if expected_manifest_hash and hashlib.sha256(manifest_path.read_bytes()).hexdigest() != expected_manifest_hash:
+        return None
+
+    files = [item for item in acquisition.get("files", []) if item.get("type") in {"bu", "rdv", "log"}]
+    if not {"bu", "rdv", "log"}.issubset({item.get("type") for item in files}):
+        return None
+    section_root = section_root.resolve()
+    for item in files:
+        relative_path = item.get("relative_path")
+        if not isinstance(relative_path, str):
+            return None
+        candidate = (acquisition_path.parent / relative_path).resolve()
+        try:
+            candidate.relative_to(section_root)
+        except ValueError:
+            return None
+        if not candidate.is_file():
+            return None
+        expected_size = item.get("size_bytes")
+        if expected_size is not None and candidate.stat().st_size != expected_size:
+            return None
+    return acquisition_path
 
 
 def decode_unverified_jws(raw: bytes) -> tuple[dict, dict]:
@@ -137,7 +242,12 @@ def main() -> int:
     parser.add_argument("--zona", required=True)
     parser.add_argument("--secao", required=True)
     parser.add_argument("--data-id", default="3221", help="TSE arquivo-urna dataset ID (default: 3221)")
-    parser.add_argument("--output", type=Path, default=Path("dados-brutos"))
+    parser.add_argument("--output", type=Path, default=Path("dados"))
+    parser.add_argument("--staging-root", type=Path, default=Path(".estado-local/staging"),
+                        help="temporary collection files are staged outside the persistent data tree")
+    parser.add_argument("--incremental", action="store_true",
+                        help="reuse already present files whose current manifest hash and local size match")
+    parser.add_argument("--progress-jsonl", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if not re.fullmatch(r"[a-z]{2}", args.uf):
         parser.error("UF must be a two-letter code")
@@ -152,19 +262,38 @@ def main() -> int:
     manifest_url = f"{base}/{key}/{stem}"
     acquisition_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     section_root = args.output / key
-    root = section_root / ".staging" / acquisition_id
+    root = args.staging_root / acquisition_id / key
     run = {"section_key": key, "data_id": args.data_id,
            "turno": {"3220": "1", "3221": "2"}.get(args.data_id), "manifest_url": manifest_url,
            "acquired_at_utc": datetime.now(timezone.utc).isoformat(), "signature_status": "unverified",
            "files": [], "file_states": [], "diagnostics": []}
+
+    def emit_progress(progress: float, stage: str, *, file: str | None = None,
+                      bytes_downloaded: int | None = None, bytes_total: int | None = None) -> None:
+        if not args.progress_jsonl:
+            return
+        event = {"progress": max(0.0, min(100.0, round(progress, 2))), "stage": stage, "file": file}
+        if bytes_downloaded is not None:
+            event["bytes_downloaded"] = bytes_downloaded
+        if bytes_total is not None:
+            event["bytes_total"] = bytes_total
+        print("@@OBSERVATORIO_PROGRESS@@" + json.dumps(event, ensure_ascii=False), file=sys.stderr, flush=True)
+
     manifest_path = root / "manifest.aux.jws"
     manifest_status = "failed"
+    emit_progress(0, "Baixando manifesto", file=manifest_path.name)
     try:
-        manifest_bytes, manifest_http = fetch(manifest_url)
+        manifest_bytes, manifest_http = fetch(
+            manifest_url,
+            progress_callback=lambda downloaded, total: emit_progress(
+                10 * downloaded / total if total else 0, "Baixando manifesto", file=manifest_path.name,
+                bytes_downloaded=downloaded, bytes_total=total),
+        )
         save_atomic(manifest_path, manifest_bytes)
         run["manifest_http"] = manifest_http
         run["manifest_sha256"] = hashlib.sha256(manifest_bytes).hexdigest()
         manifest_status = "downloaded"
+        emit_progress(10, "Manifesto baixado", file=manifest_path.name)
     except urllib.error.HTTPError as error:
         manifest_status = "not_found" if error.code == 404 else "failed"
         code = "COLLECT_JWS_HTTP_ERROR"
@@ -173,10 +302,12 @@ def main() -> int:
             section=key, file_type="jws", file_name=manifest_path.name, file_path=str(manifest_path), exception=error,
             context={"http_status": error.code, "url": manifest_url}))
     except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as error:
-        run["diagnostics"].append(diagnostic(code="COLLECT_JWS_NETWORK_ERROR", stage="collection", operation="fetch_manifest",
+        network_blocked = isinstance(error, NetworkAccessDeniedError)
+        run["diagnostics"].append(diagnostic(code="NETWORK_ACCESS_DENIED" if network_blocked else "COLLECT_JWS_NETWORK_ERROR",
+            stage="collection", operation="fetch_manifest",
             error_type="network", cause=str(getattr(error, "reason", error)), recoverability="recoverable", section=key,
             file_type="jws", file_name=manifest_path.name, file_path=str(manifest_path), exception=error,
-            context={"url": manifest_url}))
+            context={"url": manifest_url, **({"winerror": 10013} if network_blocked else {})}))
     except DownloadIncompleteError as error:
         manifest_status = "partial"
         partial_path = manifest_path.with_suffix(manifest_path.suffix + ".partial")
@@ -217,6 +348,23 @@ def main() -> int:
                 detected_format="JWS compact", context={"sha256": run.get("manifest_sha256")}))
 
     listed_types = set()
+    progress_file_positions = {}
+    if payload is not None and isinstance(payload.get("hashes"), list):
+        for entry_index, entry in enumerate(payload["hashes"]):
+            if not isinstance(entry, dict) or not isinstance(entry.get("arq", []), list):
+                continue
+            for file_index, item in enumerate(entry.get("arq", [])):
+                if not isinstance(item, dict):
+                    continue
+                file_type = canonical_manifest_file_type(item.get("tp"), item.get("nm"))
+                name = item.get("nm")
+                if (file_type in {"bu", "rdv", "log"} and isinstance(name, str)
+                        and Path(name).name == name and "/" not in name and "\\" not in name
+                        and name not in {".", ".."}):
+                    progress_file_positions[(entry_index, file_index)] = len(progress_file_positions) + 1
+    total_progress_files = len(progress_file_positions)
+    if not total_progress_files:
+        emit_progress(95, "Manifesto analisado; sem arquivos brutos para baixar")
     if payload is not None:
         hashes = payload.get("hashes")
         if not isinstance(hashes, list):
@@ -298,14 +446,59 @@ def main() -> int:
                 destination = root / relative
                 state = {"type": file_type, "name": name, "manifest_hash": content_hash,
                          "relative_path": str(relative), "url": url}
+                progress_file_index = progress_file_positions.get((entry_index, file_index), 0)
+                file_start = 10 + 85 * (progress_file_index - 1) / max(1, total_progress_files)
+                file_end = 10 + 85 * progress_file_index / max(1, total_progress_files)
+                emit_progress(file_start, f"Preparando {file_type.upper()}", file=name)
+                existing_entry = None
+                if args.incremental:
+                    expected_turn_directory = folder_for_pleito(args.data_id)
+                    existing_acquisition_path = section_root / expected_turn_directory / "acquisition.json"
+                    try:
+                        previous = json.loads(existing_acquisition_path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        previous = {}
+                    if (previous.get("section_key") == key
+                            and str(previous.get("data_id")) == str(args.data_id)):
+                        existing_entry = next((entry for entry in previous.get("files", [])
+                                               if entry.get("type") == file_type
+                                               and entry.get("name") == name
+                                               and entry.get("manifest_hash") == content_hash), None)
+                if existing_entry:
+                    existing_path = (section_root / folder_for_pleito(args.data_id)
+                                     / existing_entry.get("relative_path", "")).resolve()
+                    try:
+                        existing_path.relative_to(section_root.resolve())
+                    except ValueError:
+                        existing_path = Path()
+                    expected_size = existing_entry.get("size_bytes")
+                    if (existing_path.is_file()
+                            and (expected_size is None or existing_path.stat().st_size == expected_size)):
+                        state.update({key: value for key, value in existing_entry.items()
+                                      if key in {"http", "size_bytes", "sha256"}})
+                        state["reused_local"] = True
+                        run["files"].append(state.copy())
+                        run["file_states"].append(file_state(file_type=file_type, name=name, section=key,
+                            status="downloaded", path=str(relative), sha256=state.get("sha256"),
+                            size_bytes=state.get("size_bytes")))
+                        emit_progress(file_end, f"Reutilizando {file_type.upper()} local", file=name)
+                        continue
                 try:
-                    body, http_metadata = fetch(url)
+                    body, http_metadata = fetch(
+                        url,
+                        progress_callback=lambda downloaded, total, base_progress=file_start,
+                        span=file_end - file_start, kind=file_type, file_name=name: emit_progress(
+                            base_progress + (span * downloaded / total if total else 0),
+                            f"Baixando {kind.upper()}", file=file_name,
+                            bytes_downloaded=downloaded, bytes_total=total),
+                    )
                     save_atomic(destination, body)
                     source_hash = hashlib.sha256(body).hexdigest()
                     state.update({"http": http_metadata, "size_bytes": len(body), "sha256": source_hash, "status": "downloaded"})
                     run["files"].append(state.copy())
                     run["file_states"].append(file_state(file_type=file_type, name=name, section=key, status="downloaded",
                         path=str(relative), sha256=source_hash, size_bytes=len(body)))
+                    emit_progress(file_end, f"{file_type.upper()} baixado", file=name)
                 except urllib.error.HTTPError as error:
                     kind = "not_found" if error.code == 404 else "failed"
                     run["diagnostics"].append(diagnostic(code=f"COLLECT_{file_type.upper()}_HTTP_ERROR", stage="collection",
@@ -314,12 +507,17 @@ def main() -> int:
                         file_name=name, file_path=str(destination), exception=error, detected_format=Path(name).suffix.lstrip("."),
                         context={"http_status": error.code, "url": url, "manifest_hash": content_hash}))
                     run["file_states"].append(file_state(file_type=file_type, name=name, section=key, status=kind, reason=str(error), path=str(relative)))
+                    emit_progress(file_end, f"{file_type.upper()} indisponível", file=name)
                 except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as error:
-                    run["diagnostics"].append(diagnostic(code=f"COLLECT_{file_type.upper()}_NETWORK_ERROR", stage="collection",
+                    network_blocked = isinstance(error, NetworkAccessDeniedError)
+                    run["diagnostics"].append(diagnostic(code="NETWORK_ACCESS_DENIED" if network_blocked else f"COLLECT_{file_type.upper()}_NETWORK_ERROR",
+                        stage="collection",
                         operation="download_file", error_type="network", cause=str(getattr(error, "reason", error)), recoverability="recoverable",
                         section=key, file_type=file_type, file_name=name, file_path=str(destination), exception=error,
-                        detected_format=Path(name).suffix.lstrip("."), context={"url": url, "manifest_hash": content_hash}))
+                        detected_format=Path(name).suffix.lstrip("."), context={"url": url, "manifest_hash": content_hash,
+                            **({"winerror": 10013} if network_blocked else {})}))
                     run["file_states"].append(file_state(file_type=file_type, name=name, section=key, status="failed", reason=str(error), path=str(relative)))
+                    emit_progress(file_end, f"Falha ao baixar {file_type.upper()}", file=name)
                 except DownloadIncompleteError as error:
                     partial_path = destination.with_suffix(destination.suffix + ".partial")
                     if error.body:
@@ -331,12 +529,14 @@ def main() -> int:
                         context={"url": url, "manifest_hash": content_hash, "http": error.http_metadata}))
                     run["file_states"].append(file_state(file_type=file_type, name=name, section=key, status="partial",
                         reason=str(error), path=str(partial_path), size_bytes=len(error.body), sha256=hashlib.sha256(error.body).hexdigest()))
+                    emit_progress(file_end, f"Download parcial de {file_type.upper()}", file=name)
                 except Exception as error:
                     run["diagnostics"].append(diagnostic(code=f"COLLECT_{file_type.upper()}_DOWNLOAD_ERROR", stage="collection",
                         operation="download_file", error_type="internal", cause=str(error), recoverability="indeterminate",
                         section=key, file_type=file_type, file_name=name, file_path=str(destination), exception=error,
                         detected_format=Path(name).suffix.lstrip("."), context={"url": url, "manifest_hash": content_hash}))
                     run["file_states"].append(file_state(file_type=file_type, name=name, section=key, status="failed", reason=str(error), path=str(relative)))
+                    emit_progress(file_end, f"Falha ao baixar {file_type.upper()}", file=name)
 
     for file_type in ("bu", "rdv", "log"):
         if file_type not in listed_types:
@@ -457,6 +657,7 @@ def main() -> int:
     run["acquisition_path"] = str(final_root)
     acquisition_path = final_root / "acquisition.json"
     save_atomic(acquisition_path, json.dumps(run, ensure_ascii=False, indent=2).encode())
+    emit_progress(100, "Coleta da seção concluída")
     print(json.dumps({"section_key": key, "acquisition_id": acquisition_id,
                       "turno": detected_turn, "pleito_id": pleito_id,
                       "acquisition": str(acquisition_path),

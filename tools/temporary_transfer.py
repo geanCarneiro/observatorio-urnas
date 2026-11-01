@@ -10,12 +10,14 @@ import io
 import json
 import os
 import tempfile
+import threading
 import urllib.request
 import zipfile
-from collections import Counter, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
+from typing import Callable
 
 
 RESOURCE_ID = "4162f440-1037-4b36-9529-9544120604fa"
@@ -27,6 +29,7 @@ REQUIRED_COLUMNS = {
     "AA_ELEICAO", "NR_TURNO", "TP_TTE", "TP_ABRANGENCIA_TTE", "SG_UF_DESTINO",
     "CD_MUNICIPIO_DESTINO", "NR_ZONA_DESTINO", "NR_SECAO_DESTINO", "QT_ELEITOR",
 }
+_REFERENCE_LOAD_LOCK = threading.Lock()
 
 
 def _sha256_bytes(data: bytes) -> str:
@@ -240,7 +243,11 @@ def load_reference(directory: Path = BASE_DIR) -> TransferReferenceIndex:
     if not zip_path.exists() or not provenance_path.exists():
         raise FileNotFoundError(f"TSE temporary-transfer ZIP/provenance is missing: {zip_path}")
     stat = zip_path.stat()
-    return _load_index_cached(str(zip_path), str(provenance_path), str(expected_sha), stat.st_size, stat.st_mtime_ns)
+    # lru_cache protects its dictionary but can still compute the same missing key
+    # more than once when several section workers arrive at the first read together.
+    with _REFERENCE_LOAD_LOCK:
+        return _load_index_cached(str(zip_path), str(provenance_path), str(expected_sha),
+                                  stat.st_size, stat.st_mtime_ns)
 
 
 def reference_identity(directory: Path = BASE_DIR) -> dict:
@@ -277,7 +284,8 @@ def reference_identity(directory: Path = BASE_DIR) -> dict:
 
 
 def write_section_excerpts(targets: list[dict], directory: Path = BASE_DIR,
-                           index: TransferReferenceIndex | None = None) -> dict[str, dict]:
+                           index: TransferReferenceIndex | None = None,
+                           progress_callback: Callable | None = None) -> dict[str, dict]:
     """Write original-column CSV slices only for section/turn acquisitions supplied by the caller."""
     if not targets:
         return {}
@@ -294,36 +302,57 @@ def write_section_excerpts(targets: list[dict], directory: Path = BASE_DIR,
         uf, municipality, zone, section = key_parts
         key = (uf.upper(), municipality.zfill(5), zone.zfill(4), section.zfill(4), int(turn))
         target_map[key].append({"output_path": output_path, "row_count": 0, "electors": 0,
-                                "federal_electors": 0, "breakdown": Counter()})
+                                "federal_electors": 0, "breakdown": Counter(),
+                                "temporary_path": None, "header_written": False})
     if not target_map:
         return {}
 
     temporary_files: list[Path] = []
-    open_outputs: list[tuple[dict, object, csv.writer, Path]] = []
-    try:
-        for entries in target_map.values():
-            for entry in entries:
-                output_path = entry["output_path"]
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                fd, temp_name = tempfile.mkstemp(prefix=f".{output_path.name}.", dir=output_path.parent)
-                temporary_path = Path(temp_name)
-                temporary_files.append(temporary_path)
-                stream = os.fdopen(fd, "w", encoding="utf-8-sig", newline="")
-                open_outputs.append((entry, stream, None, temporary_path))
+    open_outputs: OrderedDict[Path, tuple[dict, object, csv.writer]] = OrderedDict()
 
-        output_lookup = {entry["output_path"]: index for index, (entry, _stream, _writer, _temp) in enumerate(open_outputs)}
+    def close_output(output_path: Path) -> None:
+        _entry, stream, _writer = open_outputs.pop(output_path)
+        stream.flush()
+        os.fsync(stream.fileno())
+        stream.close()
+
+    def get_writer(entry: dict, columns: list[str]) -> csv.writer:
+        output_path = entry["output_path"]
+        if output_path in open_outputs:
+            open_outputs.move_to_end(output_path)
+            return open_outputs[output_path][2]
+        while len(open_outputs) >= 64:
+            close_output(next(iter(open_outputs)))
+        if entry["temporary_path"] is None:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            fd, temp_name = tempfile.mkstemp(prefix=f".{output_path.name}.", dir=output_path.parent)
+            os.close(fd)
+            entry["temporary_path"] = Path(temp_name)
+            temporary_files.append(entry["temporary_path"])
+        first_open = not entry["header_written"]
+        stream = entry["temporary_path"].open("w" if first_open else "a",
+            encoding="utf-8-sig" if first_open else "utf-8", newline="")
+        writer = csv.writer(stream, delimiter=";", quotechar='"', quoting=csv.QUOTE_ALL,
+                            lineterminator="\n")
+        if first_open:
+            writer.writerow(columns)
+            entry["header_written"] = True
+        open_outputs[output_path] = (entry, stream, writer)
+        return writer
+
+    try:
         with zipfile.ZipFile(index.zip_path) as archive:
             with archive.open(MEMBER_CSV) as binary, io.TextIOWrapper(binary, encoding="latin-1", newline="") as text:
                 reader = csv.DictReader(text, delimiter=";", quotechar='"')
                 columns = list(reader.fieldnames or [])
                 if not REQUIRED_COLUMNS.issubset(columns):
                     raise ValueError("official CSV header lacks required columns while writing section excerpts")
-                for position, (entry, stream, _writer, temporary_path) in enumerate(open_outputs):
-                    writer = csv.writer(stream, delimiter=";", quotechar='"', quoting=csv.QUOTE_ALL,
-                                        lineterminator="\n")
-                    writer.writerow(columns)
-                    open_outputs[position] = (entry, stream, writer, temporary_path)
+                rows_processed = 0
                 for row in reader:
+                    rows_processed += 1
+                    if progress_callback and rows_processed % 100000 == 0:
+                        progress_callback({"stage": "Filtrando referência TTE",
+                                           "rows_processed": rows_processed})
                     try:
                         if row.get("AA_ELEICAO") != "2026":
                             continue
@@ -338,8 +367,7 @@ def write_section_excerpts(targets: list[dict], directory: Path = BASE_DIR,
                             continue
                         breakdown_key = (row["TP_TTE"], row["TP_ABRANGENCIA_TTE"])
                         for entry in destinations:
-                            output_position = output_lookup[entry["output_path"]]
-                            _entry, _stream, writer, _temporary_path = open_outputs[output_position]
+                            writer = get_writer(entry, columns)
                             writer.writerow([row.get(column, "") for column in columns])
                             entry["row_count"] += 1
                             entry["electors"] += amount
@@ -348,32 +376,49 @@ def write_section_excerpts(targets: list[dict], directory: Path = BASE_DIR,
                                 entry["federal_electors"] += amount
                     except (KeyError, TypeError, ValueError, AttributeError):
                         continue
-        for _entry, stream, _writer, _temporary_path in open_outputs:
-            stream.flush()
-            os.fsync(stream.fileno())
-            stream.close()
+                if progress_callback:
+                    progress_callback({"stage": "Filtragem da referência TTE concluída",
+                                       "rows_processed": rows_processed})
+        for output_path in list(open_outputs):
+            close_output(output_path)
         outputs = {}
-        for entry, _stream, _writer, temporary_path in open_outputs:
-            output_path = entry["output_path"]
-            os.replace(temporary_path, output_path)
-            digest = _sha256_path(output_path)
-            repo_root = Path(__file__).resolve().parents[1]
-            try:
-                displayed_path = str(output_path.resolve().relative_to(repo_root))
-            except ValueError:
-                displayed_path = str(output_path)
-            outputs[str(output_path)] = {
-                "path": displayed_path, "sha256": digest, "row_count": entry["row_count"],
-                "registered_electors_all_scopes": entry["electors"],
-                "registered_electors_federal_scope": entry["federal_electors"],
-                "transfer_type_scope_breakdown": [
-                    {"tipo_transferencia": kind, "abrangencia": scope, "quantidade_eleitores": count}
-                    for (kind, scope), count in sorted(entry["breakdown"].items())],
-                "reference_zip_sha256": index.expected_sha256,
-            }
+        columns = list(index.schema_columns)
+        for entries in target_map.values():
+            for entry in entries:
+                output_path = entry["output_path"]
+                if entry["temporary_path"] is None:
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    fd, temp_name = tempfile.mkstemp(prefix=f".{output_path.name}.", dir=output_path.parent)
+                    os.close(fd)
+                    entry["temporary_path"] = Path(temp_name)
+                    temporary_files.append(entry["temporary_path"])
+                    with entry["temporary_path"].open("w", encoding="utf-8-sig", newline="") as stream:
+                        writer = csv.writer(stream, delimiter=";", quotechar='"', quoting=csv.QUOTE_ALL,
+                                            lineterminator="\n")
+                        writer.writerow(columns)
+                temporary_path = entry["temporary_path"]
+                if temporary_path is None:
+                    continue
+                os.replace(temporary_path, output_path)
+                digest = _sha256_path(output_path)
+                repo_root = Path(__file__).resolve().parents[1]
+                try:
+                    displayed_path = str(output_path.resolve().relative_to(repo_root))
+                except ValueError:
+                    displayed_path = str(output_path)
+                outputs[str(output_path)] = {
+                    "path": displayed_path, "sha256": digest, "row_count": entry["row_count"],
+                    "registered_electors_all_scopes": entry["electors"],
+                    "registered_electors_federal_scope": entry["federal_electors"],
+                    "transfer_type_scope_breakdown": [
+                        {"tipo_transferencia": kind, "abrangencia": scope, "quantidade_eleitores": count}
+                        for (kind, scope), count in sorted(entry["breakdown"].items())],
+                    "reference_zip_sha256": index.expected_sha256,
+                }
         return outputs
     finally:
-        for _entry, stream, _writer, _temporary_path in open_outputs:
+        for output_path in list(open_outputs):
+            _entry, stream, _writer = open_outputs.pop(output_path)
             if not stream.closed:
                 stream.close()
         for temporary_path in temporary_files:

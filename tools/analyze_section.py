@@ -10,6 +10,7 @@ import re
 import zipfile
 import io
 import unicodedata
+from typing import Callable
 import asn1tools
 from rdv import decode_rdv
 from rdv import diagnose_rdv_failure
@@ -132,6 +133,15 @@ def _event_type(message: str) -> str | None:
 def _normalize_event_message(message: str) -> str:
     normalized = unicodedata.normalize("NFKD", message.casefold())
     return "".join(char for char in normalized if not unicodedata.combining(char))
+
+
+def _explicit_vote_registration_failure(message: str) -> str | None:
+    """Return the stated error code when the log explicitly says the vote was not registered."""
+    normalized = _normalize_event_message(message)
+    if "o voto do eleitor nao foi registrado" not in normalized:
+        return None
+    match = re.search(r"\((\d{4})\)", message)
+    return match.group(1) if match else ""
 
 
 def _is_cargo_confirmation(event_type: str | None) -> bool:
@@ -858,14 +868,21 @@ def analyze(log_path: Path, bu_path: Path, collection_path: Path, cuts: list[str
     }
 
 
-def process_log_file(path: Path, metadata: dict, section: str, cuts: list[str]) -> dict:
+def process_log_file(path: Path, metadata: dict, section: str, cuts: list[str],
+                     progress_callback: Callable | None = None) -> dict:
+    def report_progress(fraction: float) -> None:
+        if progress_callback:
+            progress_callback(max(0.0, min(1.0, float(fraction))))
+
     diagnostics = []
     events = []
     counts = Counter()
     after_cuts = Counter()
     counts_by_date = defaultdict(Counter)
     after_cuts_by_date = defaultdict(Counter)
+    report_progress(0.0)
     file_hash = sha256_file(path)
+    report_progress(0.04)
     if file_hash != metadata.get("sha256"):
         diagnostics.append(diagnostic(code="LOG_SHA256_MISMATCH", stage="integrity_validation", operation="verify_sha256",
             error_type="integrity", cause="Downloaded bytes differ from acquisition metadata.", recoverability="permanent",
@@ -934,15 +951,19 @@ def process_log_file(path: Path, metadata: dict, section: str, cuts: list[str]) 
             file_type="log", file_name=path.name, file_path=str(path), exception=error, detected_format="ZIP",
             context={"size_bytes": path.stat().st_size if path.exists() else None, "sha256": file_hash}))
 
+    report_progress(0.20)
     substitution_matches = 0
-    parsed_streams: dict[str, str] = {}
+    parsed_stream_identities: dict[tuple[str, str], str] = {}
     raw_record_count = 0
     parseable_record_count = 0
     malformed_record_count = 0
     unclassified_record_count = 0
     recognized_event_candidate_count = 0
     invalid_event_timestamp_count = 0
+    explicit_vote_registration_failure_count = 0
     has_any_logd = any("text_data" in source for source in sources.values())
+    text_source_count = sum("text_data" in source for source in sources.values())
+    text_source_index = 0
     for source_hash, source in sources.items():
         text_data = source.get("text_data")
         if text_data is None:
@@ -952,24 +973,52 @@ def process_log_file(path: Path, metadata: dict, section: str, cuts: list[str]) 
                     section=section, file_type="log", file_name=path.name, file_path=str(path), detected_format="ZIP",
                     context={"source_path": path.name}))
             continue
+        source_position = text_source_index
+        text_source_index += 1
+        source_start = 0.20 + 0.75 * source_position / max(1, text_source_count)
+        source_width = 0.75 / max(1, text_source_count)
         stream_hash = hashlib.sha256(text_data.encode("latin1")).hexdigest()
         source["logd_sha256"] = stream_hash
-        if stream_hash in parsed_streams:
-            primary_hash = parsed_streams[stream_hash]
+        lines = text_data.splitlines()
+        line_total = max(1, len(lines))
+        progress_interval = max(1, line_total // 50)
+        ue_identifiers_set = set()
+        for line_number, line in enumerate(lines, 1):
+            fields = line.split("\t")
+            if len(fields) >= 5 and re.fullmatch(r"\d{8}", fields[2]):
+                ue_identifiers_set.add(fields[2])
+            if line_number % progress_interval == 0 or line_number == line_total:
+                report_progress(source_start + 0.25 * source_width * line_number / line_total)
+        ue_identifiers = sorted(ue_identifiers_set)
+        source["internal_ue_identifiers"] = ue_identifiers
+        source["internal_ue_identifier"] = ue_identifiers[0] if len(ue_identifiers) == 1 else None
+        # A repeated stream is excluded only when its internal UE identifier is
+        # present and unambiguous. Unknown or mixed identities remain visible.
+        stream_identity = (stream_hash, source["internal_ue_identifier"])
+        if source["internal_ue_identifier"] and stream_identity in parsed_stream_identities:
+            primary_hash = parsed_stream_identities[stream_identity]
             primary = sources[primary_hash]
             aliases = primary["source_aliases"]
             for alias in source["source_aliases"]:
                 if alias not in aliases:
                     aliases.append(alias)
             source["duplicate_of_logd_sha256"] = stream_hash
+            source["duplicate_of_source_file_sha256"] = primary_hash
+            source["duplicate_classification"] = "complete_log_duplicate_same_internal_ue"
+            source["duplicate_excluded_from_counts"] = True
+            report_progress(source_start + source_width)
             continue
-        parsed_streams[stream_hash] = source_hash
+        if source["internal_ue_identifier"]:
+            parsed_stream_identities[stream_identity] = source_hash
         source["raw_record_count"] = 0
         source["parseable_record_count"] = 0
         source["malformed_record_count"] = 0
         source["unclassified_record_count"] = 0
         source["invalid_event_timestamp_count"] = 0
-        for line_number, raw_line in enumerate(text_data.splitlines(), 1):
+        for line_number, raw_line in enumerate(lines, 1):
+            if line_number % progress_interval == 0 or line_number == line_total:
+                report_progress(source_start + 0.25 * source_width +
+                                0.75 * source_width * line_number / line_total)
             raw_record_count += 1
             source["raw_record_count"] += 1
             fields = raw_line.split("\t")
@@ -988,7 +1037,8 @@ def process_log_file(path: Path, metadata: dict, section: str, cuts: list[str]) 
             message_lower = message.lower()
             if any(term in message_lower for term in ("contingência", "substituição", "urna substituta", "troca de urna", "recuperação dos dados")):
                 substitution_matches += 1
-            event_type = _event_type(message)
+            failure_code = _explicit_vote_registration_failure(message)
+            event_type = "falha" if failure_code is not None else _event_type(message)
             if event_type is None:
                 unclassified_record_count += 1
                 source["unclassified_record_count"] += 1
@@ -1012,8 +1062,11 @@ def process_log_file(path: Path, metadata: dict, section: str, cuts: list[str]) 
                 "source_path": aliases[0]["source_path"],
                 "source_aliases": aliases,
                 "logd_sha256": stream_hash,
-                "equipment_identifier": f"log-stream-sha256:{stream_hash}",
-                "equipment_identification_basis": "decompressed logd.dat hash; source aliases are retained, hardware serial is not present in parsed fields",
+                "internal_ue_identifier": fields[2] if re.fullmatch(r"\d{8}", fields[2]) else None,
+                "equipment_identifier": (f"ue:{fields[2]}:log-stream-sha256:{stream_hash}"
+                    if re.fullmatch(r"\d{8}", fields[2])
+                    else f"unverified-log-stream:{stream_hash}:source:{source_hash}"),
+                "equipment_identification_basis": "internal UE identifier from log record field 3 plus complete decompressed logd.dat stream hash; hardware serial is not inferred",
                 "line_number": line_number, "event_type": event_type,
                 "event_timestamp_raw": fields[0], "event_date": timestamp.strftime("%Y-%m-%d"),
                 "event_time": hhmm, "at_or_after_clock_cuts": [cut for cut in cuts if hhmm >= cut],
@@ -1032,6 +1085,11 @@ def process_log_file(path: Path, metadata: dict, section: str, cuts: list[str]) 
             if event_type == "evento_desconhecido_relevante":
                 event["message_raw"] = message
                 event["parser_status"] = "potentially_relevant_unclassified"
+            if failure_code is not None:
+                event["message_raw"] = message
+                event["vote_registration_status"] = "explicitly_not_registered"
+                event["vote_registration_failure_code"] = failure_code or None
+                explicit_vote_registration_failure_count += 1
             events.append(event)
             counts[event_type] += 1
             event_date = timestamp.strftime("%Y-%m-%d")
@@ -1043,8 +1101,12 @@ def process_log_file(path: Path, metadata: dict, section: str, cuts: list[str]) 
                         after_cuts[key] += 1
                         after_cuts_by_date[event_date][key] += 1
 
+    if not text_source_count:
+        report_progress(0.95)
     sessions = reconstruct_voting_sessions(events)
+    report_progress(0.98)
     by_date = summarize_events_by_date(events)
+    report_progress(1.0)
     return {"status": "processed_with_diagnostics" if diagnostics else "processed", "events": events,
         "diagnostics": diagnostics, "event_counts": dict(counts), "activity_after_clock_cuts": dict(after_cuts),
         "event_counts_by_date": {date: dict(day) for date, day in counts_by_date.items()},
@@ -1054,6 +1116,11 @@ def process_log_file(path: Path, metadata: dict, section: str, cuts: list[str]) 
                           "contains_logd_dat": "text_data" in source,
                           "logd_sha256": source.get("logd_sha256"),
                           "duplicate_of_logd_sha256": source.get("duplicate_of_logd_sha256"),
+                          "duplicate_of_source_file_sha256": source.get("duplicate_of_source_file_sha256"),
+                          "duplicate_classification": source.get("duplicate_classification"),
+                          "duplicate_excluded_from_counts": source.get("duplicate_excluded_from_counts", False),
+                          "internal_ue_identifiers": source.get("internal_ue_identifiers", []),
+                          "internal_ue_identifier": source.get("internal_ue_identifier"),
                           "raw_record_count": source.get("raw_record_count", 0),
                           "parseable_record_count": source.get("parseable_record_count", 0),
                           "malformed_record_count": source.get("malformed_record_count", 0),
@@ -1062,19 +1129,23 @@ def process_log_file(path: Path, metadata: dict, section: str, cuts: list[str]) 
                           "event_count": sum(event["source_file_sha256"] == source_hash for event in events)}
                          for source_hash, source in sources.items()],
         "log_record_accounting": {
-            "unique_log_stream_count": len(parsed_streams),
+            "unique_log_stream_count": sum(1 for source in sources.values()
+                if source.get("logd_sha256") and not source.get("duplicate_excluded_from_counts")),
+            "complete_duplicate_log_count": sum(1 for source in sources.values()
+                if source.get("duplicate_excluded_from_counts")),
             "raw_record_count": raw_record_count,
             "parseable_record_count": parseable_record_count,
             "malformed_record_count": malformed_record_count,
             "unclassified_record_count": unclassified_record_count,
             "recognized_event_candidate_count": recognized_event_candidate_count,
+            "explicit_vote_registration_failure_count": explicit_vote_registration_failure_count,
             "invalid_event_timestamp_count": invalid_event_timestamp_count,
             "normalized_event_count": len(events),
             "parseable_records_without_normalized_event_count": parseable_record_count - len(events),
             "record_partition_matches_parseable_records": (unclassified_record_count
                 + invalid_event_timestamp_count + len(events) == parseable_record_count),
             "record_partition_matches_raw_records": parseable_record_count + malformed_record_count == raw_record_count,
-            "counting_unit": "records from unique decompressed logd.dat streams; duplicate streams are excluded",
+            "counting_unit": "records from unique decompressed logd.dat streams; only complete duplicates with the same verified internal UE identifier are excluded",
         },
         "nested_archive_count": max(0, len(sources) - 1), "substitution_keyword_matches": substitution_matches,
         "sha256": file_hash, "size_bytes": path.stat().st_size, "detected_format": "ZIP/JEZ",
@@ -1122,7 +1193,8 @@ def log_bu_reconciliation_diagnostics(validation: dict, section: str, log_path: 
 
 def analyze_collection(collection_path: Path, cuts: list[str], bu_schema_path: Path,
                        rdv_schema_path: Path, selected_logs: list[Path] | None = None,
-                       selected_bus: list[Path] | None = None) -> dict:
+                       selected_bus: list[Path] | None = None,
+                       progress_callback: Callable | None = None) -> dict:
     collection = json.loads(collection_path.read_text(encoding="utf-8"))
     section = collection.get("section_key")
     entries = collection.get("files", [])
@@ -1172,13 +1244,22 @@ def analyze_collection(collection_path: Path, cuts: list[str], bu_schema_path: P
     log_results = []
     bu_results = []
     rdv_results = []
-    for item in entries:
+    for entry_index, item in enumerate(entries, start=1):
+        def report_file_progress(fraction: float) -> None:
+            if progress_callback:
+                bounded_fraction = max(0.0, min(1.0, float(fraction)))
+                progress_callback({"processed": entry_index - 1 + bounded_fraction,
+                    "total": len(entries), "file": item.get("name"), "file_type": item.get("type")})
+
+        report_file_progress(0.0)
         file_type = item.get("type")
         if file_type == "vota" and str(item.get("name", "")).lower().endswith(".vsc"):
             file_type = "vota.vsc"
         if file_type == "vota.vsc":
+            report_file_progress(1.0)
             continue
         if file_type not in {"bu", "rdv", "log"}:
+            report_file_progress(1.0)
             continue
         relative_path = item.get("relative_path")
         if not relative_path:
@@ -1188,6 +1269,7 @@ def analyze_collection(collection_path: Path, cuts: list[str], bu_schema_path: P
                 context={"manifest_hash": item.get("manifest_hash")}))
             states.append(file_state(file_type=file_type, name=item.get("name"), section=section, status="not_processed",
                 reason="No relative path was recorded."))
+            report_file_progress(1.0)
             continue
         path = collection_path.parent / relative_path
         if not path.exists():
@@ -1199,10 +1281,12 @@ def analyze_collection(collection_path: Path, cuts: list[str], bu_schema_path: P
             diagnostics.append(missing_diag)
             states.append(file_state(file_type=file_type, name=item.get("name"), section=section, status="missing",
                 reason=missing_diag["cause"], path=str(path)))
+            report_file_progress(1.0)
             continue
         if file_type == "log":
             try:
-                result = process_log_file(path, item, section, cuts)
+                result = process_log_file(path, item, section, cuts,
+                    progress_callback=report_file_progress)
             except Exception as error:
                 diag = diagnostic(code="LOG_PROCESSING_FAILED", stage="log_processing", operation="process_log_file",
                     error_type="internal", cause=str(error), recoverability="indeterminate", section=section,
@@ -1282,6 +1366,12 @@ def analyze_collection(collection_path: Path, cuts: list[str], bu_schema_path: P
             if result.get("status") == "decoded":
                 processed.append(file_type)
 
+        report_file_progress(1.0)
+
+    if progress_callback:
+        progress_callback({"processed": len(entries), "total": len(entries),
+                           "file": None, "file_type": None})
+
     # Carry forward explicit absence/applicability states from acquisition; analyzer inputs missing from disk are added above.
     file_types = {state.get("type") for state in states}
     for file_type in ("jws", "bu", "rdv", "log", "vota.vsc", "signature_verification"):
@@ -1299,7 +1389,8 @@ def analyze_collection(collection_path: Path, cuts: list[str], bu_schema_path: P
             all_events_by_key = {}
             for log_result in log_results:
                 for event in log_result.get("events", []):
-                    key = (event.get("logd_sha256"), event.get("line_number"))
+                    key = (event.get("logd_sha256"), event.get("line_number"),
+                           event.get("equipment_identifier"))
                     if key not in all_events_by_key:
                         all_events_by_key[key] = event
                     else:
@@ -1321,8 +1412,9 @@ def analyze_collection(collection_path: Path, cuts: list[str], bu_schema_path: P
             unique_streams = {}
             for source in sources_by_hash.values():
                 stream_hash = source.get("logd_sha256")
-                if stream_hash and not source.get("duplicate_of_logd_sha256"):
-                    unique_streams.setdefault(stream_hash, source)
+                if stream_hash and not source.get("duplicate_excluded_from_counts"):
+                    identity = source.get("internal_ue_identifier")
+                    unique_streams.setdefault((stream_hash, identity or source.get("sha256")), source)
             legacy_report["log_record_accounting"] = {
                 "unique_log_stream_count": len(unique_streams),
                 "raw_record_count": sum(source.get("raw_record_count", 0) for source in unique_streams.values()),
@@ -1333,7 +1425,9 @@ def analyze_collection(collection_path: Path, cuts: list[str], bu_schema_path: P
                     for source in unique_streams.values()),
                 "invalid_event_timestamp_count": sum(source.get("invalid_event_timestamp_count", 0)
                     for source in unique_streams.values()),
-                "counting_unit": "records from unique decompressed logd.dat streams; duplicate streams and source aliases are excluded",
+                "complete_duplicate_log_count": sum(1 for source in sources_by_hash.values()
+                    if source.get("duplicate_excluded_from_counts")),
+                "counting_unit": "records from unique decompressed logd.dat streams; only complete duplicates with the same verified internal UE identifier are excluded",
             }
             legacy_report["voting_sessions"]["event_accounting"] = session_reconstruction["event_accounting"]
             bu_data = next(item["data"] for item in bu_results if item.get("data"))

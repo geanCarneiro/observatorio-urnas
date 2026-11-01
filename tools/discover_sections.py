@@ -4,17 +4,20 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
 import re
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlencode
 from urllib.error import HTTPError, URLError
 
-from collect_section import DownloadIncompleteError, decode_unverified_jws, fetch, save_atomic
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from collect_section import (DownloadIncompleteError, NetworkAccessDeniedError,
+                             decode_unverified_jws, fetch, save_atomic)
 from diagnostics import diagnostic
 from section_aggregation import aggregation_counts, link_aggregations
 
@@ -23,6 +26,7 @@ BASE_URL = "https://resultados.tse.jus.br/oficial/ele2026/arquivo-urna/{config_i
 TERRITORIES = (
     "ac al ap am ba ce df es zz go ma mt ms mg pr pb pa pe pi rj rn rs ro rr sc se sp to"
 ).split()
+DEFAULT_CATALOG_WORKERS = 15
 
 
 def normalize_filter_values(value: str | list[str] | tuple[str, ...] | None, width: int,
@@ -143,16 +147,50 @@ def classify_discovery_error(error: Exception) -> tuple[str, str]:
     return "internal", "indeterminate"
 
 
+def _fetch_catalog(config_id: str, state: str, catalog_dir: Path,
+                   cache_dir: Path | None) -> dict:
+    url = BASE_URL.format(config_id=config_id, uf=state)
+    file_name = f"{state}-p00{config_id}-cs.jws"
+    file_path = catalog_dir / file_name
+    cached_body = None
+    cached_metadata = None
+    cache_path = cache_dir / config_id / file_name if cache_dir else None
+    metadata_path = cache_path.with_suffix(cache_path.suffix + ".json") if cache_path else None
+    if cache_path and metadata_path and cache_path.is_file() and metadata_path.is_file():
+        try:
+            saved = json.loads(metadata_path.read_text(encoding="utf-8"))
+            candidate = cache_path.read_bytes()
+            if saved.get("sha256") == hashlib.sha256(candidate).hexdigest():
+                cached_body = candidate
+                cached_metadata = saved.get("http") or {}
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    raw, http_metadata = fetch(url, cached_body=cached_body, cached_metadata=cached_metadata)
+    save_atomic(file_path, raw)
+    if cache_path and metadata_path:
+        save_atomic(cache_path, raw)
+        cache_record = {"sha256": hashlib.sha256(raw).hexdigest(), "http": http_metadata,
+                        "url": url, "updated_at_utc": datetime.now(timezone.utc).isoformat()}
+        save_atomic(metadata_path, json.dumps(cache_record, ensure_ascii=False, indent=2).encode("utf-8") + b"\n")
+    return {"uf": state, "url": url, "file_name": file_name, "file_path": file_path,
+            "raw": raw, "http": http_metadata}
+
+
 def discover(*, config_id: str, output: Path, uf: str | list[str] | None = None,
              municipio: str | list[str] | None = None, zona: str | list[str] | None = None,
              secao: str | list[str] | None = None, offset: int = 0,
-             limit: int | None = None, ufs: list[str] | None = None) -> dict:
+             limit: int | None = None, ufs: list[str] | None = None,
+             cache_dir: Path | None = None, progress_callback=None,
+             catalog_workers: int = DEFAULT_CATALOG_WORKERS) -> dict:
     if not re.fullmatch(r"\d{4}", config_id):
         raise ValueError("config-id must contain exactly four digits")
     if offset < 0:
         raise ValueError("offset must be zero or greater")
     if limit is not None and limit < 1:
         raise ValueError("limit must be positive when provided")
+    if catalog_workers < 1:
+        raise ValueError("catalog-workers must be positive")
     uf_values = normalize_filter_values(uf, 2, "uf", lowercase=True)
     municipality_values = normalize_filter_values(municipio, 5, "municipio")
     zone_values = normalize_filter_values(zona, 4, "zona")
@@ -171,38 +209,74 @@ def discover(*, config_id: str, output: Path, uf: str | list[str] | None = None,
     successfully_parsed_catalogs = set()
     acquired_at = datetime.now(timezone.utc).isoformat()
 
-    for state in requested_ufs:
-        url = BASE_URL.format(config_id=config_id, uf=state)
-        url += "?" + urlencode({"nocache": str(time.time_ns() // 1_000_000)})
-        file_name = f"{state}-p00{config_id}-cs.jws"
-        file_path = catalog_dir / file_name
-        try:
-            raw, http_metadata = fetch(url)
-        except DownloadIncompleteError as error:
-            partial_path = file_path.with_suffix(file_path.suffix + ".partial")
-            if error.body:
-                save_atomic(partial_path, error.body)
-            diagnostics.append(diagnostic(
-                code="SECTION_CATALOG_DOWNLOAD_INCOMPLETE", stage="collection", operation="download_section_catalog",
-                error_type="download_incomplete", cause=str(error), recoverability="recoverable",
-                section=state, file_type="jws", file_name=file_name, file_path=str(partial_path), exception=error,
-                detected_format="JWS compact", position={"partial_bytes": len(error.body)},
-                context={"url": url, "config_id": config_id, "http": error.http_metadata},
-            ))
-            continue
-        except Exception as error:
-            error_type, recoverability = classify_discovery_error(error)
-            operation = "fetch_section_catalog"
-            stage = "collection"
-            diagnostics.append(diagnostic(
-                code="SECTION_CATALOG_FETCH_FAILED", stage=stage, operation=operation,
-                error_type=error_type, cause=str(error), recoverability=recoverability,
-                section=state, file_type="jws", file_name=file_name, file_path=str(file_path), exception=error,
-                detected_format="JWS compact", context={"url": url, "config_id": config_id},
-            ))
-            continue
+    catalog_results = {}
+    total_catalogs = len(requested_ufs)
+    completed_catalogs = 0
+    network_blocked = False
+    with ThreadPoolExecutor(max_workers=min(catalog_workers, total_catalogs)) as pool:
+        pending = {pool.submit(_fetch_catalog, config_id, state, catalog_dir, cache_dir): state
+                   for state in requested_ufs}
+        for future in as_completed(pending):
+            state = pending[future]
+            completed_catalogs += 1
+            try:
+                catalog_results[state] = future.result()
+                cache_status = catalog_results[state]["http"].get("cache_status", "downloaded")
+                action = "revalidado; conteúdo local reutilizado" if cache_status == "revalidated" else "baixado"
+                message = f"Catálogo {config_id}: {state.upper()} {action} ({completed_catalogs}/{total_catalogs})"
+            except NetworkAccessDeniedError as error:
+                network_blocked = True
+                diagnostics.append(diagnostic(
+                    code="NETWORK_ACCESS_DENIED", stage="collection", operation="download_section_catalog",
+                    error_type="network", cause=str(error), recoverability="recoverable", section=state,
+                    file_type="jws", file_name=f"{state}-p00{config_id}-cs.jws",
+                    file_path=str(catalog_dir / f"{state}-p00{config_id}-cs.jws"), exception=error,
+                    detected_format="JWS compact", context={"config_id": config_id, "winerror": 10013},
+                ))
+                for queued in pending:
+                    queued.cancel()
+                message = "Inventário interrompido: o processo não tem permissão de rede (WinError 10013)."
+            except DownloadIncompleteError as error:
+                file_name = f"{state}-p00{config_id}-cs.jws"
+                file_path = catalog_dir / file_name
+                partial_path = file_path.with_suffix(file_path.suffix + ".partial")
+                if error.body:
+                    save_atomic(partial_path, error.body)
+                diagnostics.append(diagnostic(
+                    code="SECTION_CATALOG_DOWNLOAD_INCOMPLETE", stage="collection", operation="download_section_catalog",
+                    error_type="download_incomplete", cause=str(error), recoverability="recoverable",
+                    section=state, file_type="jws", file_name=file_name, file_path=str(partial_path), exception=error,
+                    detected_format="JWS compact", position={"partial_bytes": len(error.body)},
+                    context={"config_id": config_id, "http": error.http_metadata},
+                ))
+                message = f"Catálogo {config_id}: falha ao baixar {state.upper()} ({completed_catalogs}/{total_catalogs})"
+            except Exception as error:
+                error_type, recoverability = classify_discovery_error(error)
+                diagnostics.append(diagnostic(
+                    code="SECTION_CATALOG_FETCH_FAILED", stage="collection", operation="fetch_section_catalog",
+                    error_type=error_type, cause=str(error), recoverability=recoverability,
+                    section=state, file_type="jws", file_name=f"{state}-p00{config_id}-cs.jws",
+                    file_path=str(catalog_dir / f"{state}-p00{config_id}-cs.jws"), exception=error,
+                    detected_format="JWS compact", context={"url": BASE_URL.format(config_id=config_id, uf=state),
+                                                              "config_id": config_id},
+                ))
+                message = f"Catálogo {config_id}: falha em {state.upper()} ({completed_catalogs}/{total_catalogs})"
+            if progress_callback:
+                progress_callback({"type": "catalog_progress", "config_id": config_id, "uf": state,
+                                   "completed": completed_catalogs, "total": total_catalogs,
+                                   "worker_limit": min(catalog_workers, total_catalogs),
+                                   "stage": f"Catálogos {config_id}", "processed": completed_catalogs,
+                                   "progress": completed_catalogs * 100 / total_catalogs,
+                                   "message": message, "network_blocked": network_blocked})
+            if network_blocked:
+                break
 
-        save_atomic(file_path, raw)
+    for state in requested_ufs:
+        if state not in catalog_results:
+            continue
+        result = catalog_results[state]
+        url, file_name, file_path = result["url"], result["file_name"], result["file_path"]
+        raw, http_metadata = result["raw"], result["http"]
         raw_sha256 = hashlib.sha256(raw).hexdigest()
         source = {"uf": state, "url": url, "path": str(file_path), "sha256": raw_sha256,
                   "size_bytes": len(raw), "http": http_metadata, "signature_status": "not_verified"}
@@ -239,7 +313,7 @@ def discover(*, config_id: str, output: Path, uf: str | list[str] | None = None,
     diagnostics.extend(aggregation_diagnostics)
     records.sort(key=lambda item: (item["uf"], item["municipio"], item["zona"], item["secao"]))
     child_filters_selected = any((municipality_values, zone_values, section_values))
-    if child_filters_selected and len(successfully_parsed_catalogs) != len(requested_ufs):
+    if child_filters_selected and not network_blocked and len(successfully_parsed_catalogs) != len(requested_ufs):
         raise ValueError("cannot validate child filters because one or more selected UF catalogs are unavailable or invalid")
     if len(successfully_parsed_catalogs) == len(requested_ufs):
         validate_filter_membership(records, uf_values, municipality_values, zone_values, section_values)
@@ -275,7 +349,7 @@ def discover(*, config_id: str, output: Path, uf: str | list[str] | None = None,
         "sections": page,
         "report_path": str(report_path),
         "diagnostics": diagnostics,
-        "status": "complete" if not diagnostics else "partial" if catalog_sources else "failed",
+        "status": "failed" if network_blocked or not catalog_sources else "partial" if diagnostics else "complete",
         "integrity": {"raw_catalogs_preserved": True, "catalog_hashes": "sha256",
                       "cryptographic_signatures_verified": False},
     }
@@ -294,10 +368,15 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=None,
                         help="maximum selected sections (omit to select all matching sections)")
     parser.add_argument("--output", type=Path, default=Path("inventario"))
+    parser.add_argument("--cache-dir", type=Path, default=Path(".estado-local/catalog-cache"),
+                        help="shared, conditionally revalidated catalog cache")
+    parser.add_argument("--catalog-workers", type=int, default=DEFAULT_CATALOG_WORKERS,
+                        help=f"maximum parallel catalog requests (default: {DEFAULT_CATALOG_WORKERS})")
     args = parser.parse_args()
     try:
         report = discover(config_id=args.config_id, output=args.output, uf=args.uf, municipio=args.municipio,
-                          zona=args.zona, secao=args.secao, offset=args.offset, limit=args.limit)
+                          zona=args.zona, secao=args.secao, offset=args.offset, limit=args.limit,
+                          cache_dir=args.cache_dir, catalog_workers=args.catalog_workers)
     except ValueError as error:
         parser.error(str(error))
     print(json.dumps({key: report[key] for key in (

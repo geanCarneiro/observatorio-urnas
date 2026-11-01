@@ -1,7 +1,9 @@
 dados/
+.estado-local/
 .venv/
 venv/
 __pycache__/
 *.py[cod]
 .env
 reports/
+consolidados/

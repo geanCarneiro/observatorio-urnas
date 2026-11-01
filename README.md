@@ -4,7 +4,9 @@ Coleta de arquivos públicos do TSE por seção, preservando bytes originais, me
 
 ## Descobrir e filtrar seções
 
-O catálogo estadual é salvo sem alteração em `inventario/catalogs/`, e o inventário filtrado em `inventario/section-inventory.json`. Datas e horas do catálogo (`da`, `ha`) são preservadas como texto bruto. A assinatura JWS é registrada como não verificada.
+O catálogo estadual é salvo sem alteração em `inventario/catalogs/`, e o inventário filtrado em `inventario/section-inventory.json`. Catálogos de UFs diferentes são consultados em paralelo, com limite de 15 requisições, e o andamento mostra quantos já foram processados. Nos jobs locais da UI/CLI, os bytes e validadores HTTP ficam em `.estado-local/catalog-cache/`; prévias seguintes revalidam `ETag`/`Last-Modified` e reutilizam o conteúdo quando o TSE responde `304`. Catálogos de inventários locais anteriores são aproveitados ao inicializar esse cache. Datas e horas do catálogo (`da`, `ha`) são preservadas como texto bruto. A assinatura JWS é registrada como não verificada.
+
+Se Windows ou o ambiente de execução bloquear conexões de saída (`WinError 10013`), a descoberta interrompe as outras UFs sem repetir a mesma falha e informa que a UI/CLI precisa ser executada em um ambiente com acesso externo à rede.
 
 Os campos oficiais `nsp` (seção principal referenciada pela seção agregada) e `nsa` (seções agregadas vinculadas à seção principal) também são preservados como recebidos. O inventário acrescenta os relacionamentos normalizados nos dois sentidos e os valida, registrando referências ausentes, vínculos não recíprocos, múltiplos principais e ciclos em `diagnostics`. Seções agregadas são marcadas com `aggregation_role: "aggregated"` e `collection_status: "aggregated"`; o coletor as ignora sem solicitar arquivos individuais. Inventários mostram as contagens cadastradas, agregadas e coletáveis; após a coleta, o workflow registra coletadas, falhas reais e seções ainda não processadas.
 
@@ -32,13 +34,13 @@ python tools/collect_sections.py --sections inventario/section-inventory.json --
 ## Rodar o piloto de Cariacica
 
 ```sh
-python3 -m pip install -r requirements.txt
-python3 tools/collect_section.py --uf es --municipio 56251 --zona 0054 --secao 0509 --output dados
-ACQ=$(find dados/es/56251/0054/0509 -name acquisition.json -type f | sort | tail -1)
-python3 tools/extract_section_data.py --acquisition "$ACQ"
+python -m pip install -r requirements.txt
+python tools/local_jobs.py collect --turn 2 --uf es --municipio 56251 --zona 0054 --secao 0509
 ```
 
-Os originais e seus JSONs estruturados ficam juntos sob `dados/`, ignorado pelo Git. O JSON do log preserva os timestamps e eventos individuais sem mensagens brutas nem identificadores. A extração não aplica faixas horárias nem consolida eventos em contagens.
+O job local verifica se a aquisição já está completa e, se necessário, coleta os arquivos ausentes e processa a extração. Os originais e seus JSONs estruturados ficam juntos sob `dados/`, ignorado pelo Git. O JSON do log preserva os timestamps e eventos individuais sem mensagens brutas nem identificadores. A extração não aplica faixas horárias nem consolida eventos em contagens.
+
+Para processar dados em remessas limitadas, use **Consolidar por remessas** na UI ou `python tools/local_jobs.py batch-process --turn ambos --uf "al, ba, ce, ma, pb, pe, pi, rn, se" --secoes-por-remessa 500 --workers 30 --confirmar-limpeza`. A operação exige confirmação para limpar todo o conteúdo de `dados/` no início e limpa os brutos após salvar cada consolidado. Cada worker executa coleta e análise de uma seção, enquanto outros workers podem estar em etapas diferentes. Ao fim de cada remessa, um finalizador grava os resultados separados por estado em `consolidados/<run_id>/<UF>/` e cria um índice da remessa. Os resultados compactos ficam separados do estado em `.estado-local/` e dos dados brutos temporários. A análise é determinística e não grava JSONs detalhados por arquivo; evidências de anomalias ou processamentos incompletos são preservadas para investigação.
 
 ## GitHub Actions
 
@@ -63,5 +65,46 @@ dados/es/56251/0054/0509/
 Cada pasta de turno mantém a aquisição mais recente daquele turno. Uma nova coleta no mesmo diretório atualiza arquivos com o mesmo nome oficial; o `acquisition.json` registra a proveniência da versão presente. O Actions publica um artefato imutável por execução.
 
 O workflow **Piloto de coleta de seção** coleta os dois turnos de uma única seção em uma execução.
+
+## Execução local
+
+Instale as dependências uma vez no ambiente Python usado na máquina:
+
+```powershell
+python -m pip install -r requirements.txt
+```
+
+O comando local mantém a CLI disponível para automação e uso no terminal:
+
+```powershell
+# Coleta incremental do segundo turno; filtros vazios significam abrangência nacional
+python tools/local_jobs.py collect --turn 2 --uf es --municipio 56251 --zona 0054
+
+# Buscar novamente os brutos para as seções selecionadas e substituir arquivos de mesmo nome
+python tools/local_jobs.py collect --turn 2 --uf es --municipio 56251 --zona 0054 --refresh
+
+# Reprocessar os dados já baixados, sem coletar arquivos brutos
+python tools/local_jobs.py reprocess
+
+# Listar e retomar uma execução local interrompida ou incompleta
+python tools/local_jobs.py list-runs
+python tools/local_jobs.py resume --run-id <id-da-execução>
+```
+
+Durante a extração, a CLI emite eventos JSON `job_snapshot` (até uma atualização por segundo) com os workers ativos, seu percentual, a quantidade aguardando e as próximas seções da fila.
+
+Por padrão, a coleta incremental pula aquisições completas da mesma seção e turno. Em aquisições incompletas, consulta o manifesto atual e reutiliza os arquivos locais que continuam listados com o mesmo hash e tamanho; baixa ou atualiza os demais. `--refresh` ignora essa reutilização e baixa novamente os arquivos listados. Os arquivos são publicados atomicamente, substituindo nomes iguais sem remover arquivos antigos com outros nomes.
+
+Para disparar e acompanhar os mesmos jobs por uma UI local no navegador, dê duplo clique em `abrir-observatorio.bat`. O launcher abre o navegador e mantém um terminal aberto para acompanhar o job; `Ctrl+C` encerra o servidor.
+
+Também é possível iniciar pelo terminal:
+
+```powershell
+python tools/local_ui.py
+```
+
+A UI permite pré-visualizar o escopo, coletar incrementalmente, atualizar os brutos, reprocessar localmente e retomar uma execução. Ela usa apenas a biblioteca padrão do Python, abre em `127.0.0.1` e recebe atualizações em tempo real por SSE; comandos continuam sendo enviados por HTTP. A descoberta consulta até 15 catálogos de UF em paralelo. A coleta local usa uma fila contínua de itens por seção, alimentada durante o percurso do inventário; não espera uma remessa inteira terminar para iniciar a seguinte. A quantidade de workers de seção é configurável na UI e pela opção `--workers` na CLI; o padrão é 15 e não há teto fixo. Os workers percorrem coleta e extração no mesmo fluxo, e a UI/CLI mostram percentual, etapa, atividade e próximas seções aguardando. Os recortes da referência de transferência temporária são gerados numa varredura única ao final, com andamento por linhas verificadas, para evitar uma leitura completa do CSV para cada seção. A UI mantém um cartão por worker configurado; os ociosos indicam “Parado”, evitando que o painel mude de tamanho conforme os workers iniciam e terminam. O plano ainda registra offsets para auditoria, mas eles não são barreiras de execução. A mesma seção geográfica não roda em dois workers simultaneamente porque os logs de turnos diferentes compartilham a pasta `logs/` da seção. **Parar após os workers ativos terminarem** salva o andamento para retomada. Os detalhes de cada execução incluem parâmetros, plano, contagens, eventos recentes e registros de seção paginados; os parâmetros podem ser copiados ou usados para iniciar uma nova execução após uma prévia atualizada. O reprocessamento usa os arquivos sob `dados/` e as referências locais do repositório, sem baixar novos dados brutos.
+
+Os inventários, planos, checkpoints SQLite, eventos (`events.jsonl`) e arquivos temporários dos jobs ficam em `.estado-local/runs/<id>/`, separado de `dados/` e ignorado pelo Git. O cache revalidável dos catálogos fica em `.estado-local/catalog-cache/`. `dados/` contém apenas as árvores de amostras, arquivos brutos e saídas derivadas. Uma retomada usa o estado da mesma execução; uma nova coleta incremental também aproveita aquisições completas já presentes em `dados/`.
 
 Consulte `docs/` para a auditoria da referência, desenho de escala e evidências/limitações do piloto.
