@@ -165,7 +165,8 @@ def _cargo_from_vote_event_type(event_type: str) -> str:
 
 
 def _cargo_slug(label: str) -> str:
-    normalized = _normalize_event_message(label)
+    separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", label)
+    normalized = _normalize_event_message(separated)
     slug = re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
     aliases = {
         "presidente_da_republica": "presidente",
@@ -550,8 +551,8 @@ def reconcile_log_metrics(events: list[dict], sessions: list[dict], bu: dict,
         for result in election.get("results", []):
             for cargo in result.get("cargos", []):
                 code = cargo.get("cargo")
-                if isinstance(code, int):
-                    cargo_name = BU_CARGO_LABELS.get(code)
+                if isinstance(code, int) or str(code).isdigit():
+                    cargo_name = BU_CARGO_LABELS.get(int(code))
                     cargo_kind = "cargoConstitucional"
                 else:
                     cargo_name = _cargo_slug(str(code))

@@ -183,6 +183,17 @@ public sealed class PythonUiBackend : IDisposable
         return content;
     }
 
+    public async Task<string> GetRunEventsPageAsync(string runId, long? before, int limit,
+        CancellationToken cancellationToken)
+    {
+        var path = $"/api/runs/{Uri.EscapeDataString(runId)}/events?limit={limit}";
+        if (before is not null) path += $"&before={before.Value}";
+        using var response = await _http.GetAsync(path, cancellationToken);
+        var content = await response.Content.ReadAsStringAsync(cancellationToken);
+        if (!response.IsSuccessStatusCode) throw ApiError(content, response.ReasonPhrase);
+        return content;
+    }
+
     public async Task<JobPreview> PreviewAsync(NewJobConfiguration configuration,
         CancellationToken cancellationToken)
     {

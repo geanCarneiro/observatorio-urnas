@@ -339,7 +339,7 @@ def _execute_process_task(task: dict) -> dict:
                         "summary_valid": summary_valid, "acquisition": inspected})
                 untracked = []
                 if (section_root.exists()
-                        and set(task["turns"]) == set(str(turn) for turn in turns_by_key[key])):
+                        and set(task["turns"]) == set(task.get("all_turns") or task["turns"])):
                     for current, directories, files in os.walk(section_root, topdown=True, followlinks=False):
                         current_path = Path(current)
                         for name in directories:
@@ -421,7 +421,11 @@ def _execute_process_task(task: dict) -> dict:
                     raise RuntimeError(f"seção {key}: a árvore bruta permaneceu após a limpeza")
                 return {"task": task, "outcomes": [], "success": True,
                     "physical_validation": physical_validation, "process_id": os.getpid()}
-            return {"task": task, "outcomes": outcomes, "success": True,
+            outcome_failed = any(
+                outcome.get("status") == "failed"
+                or outcome.get("extract_status") == "failed"
+                for outcome in outcomes)
+            return {"task": task, "outcomes": outcomes, "success": not outcome_failed,
                 "network_blocked": any(item.get("network_blocked", False) for item in outcomes),
                 "process_id": os.getpid()}
     except Exception as error:
@@ -896,8 +900,9 @@ def _persistent_callback(run_dir: Path, callback: Callable | None, worker_limit:
                     # Keep lifecycle activity restorable without duplicating the full
                     # worker payload (inventory metadata and progress details).
                     persisted_event = {key: event[key] for key in (
-                        "type", "run_id", "section", "stage", "stage_kind", "turn", "turns",
-                        "status", "error", "traceback") if key in event}
+                        "type", "run_id", "job_id", "section", "stage", "stage_kind", "turn", "turns",
+                        "status", "error", "traceback", "process_id", "worker_id",
+                        "worker_parameters") if key in event}
                 with event_path.open("a", encoding="utf-8") as output:
                     output.write(json.dumps({"recorded_at_utc": _utc_now(), **persisted_event}, ensure_ascii=False) + "\n")
             if event_type == "job_queue":
@@ -2275,6 +2280,7 @@ def _execute_section_unit_processing(run_dir: Path, connection: sqlite3.Connecti
                      "acquisition_path": stored["acquisition_path"],
                      "raw_status": stored["raw_status"]} if stored else None))
         return {"stage": "audit", "section_key": key, "turns": selected_turns,
+                "all_turns": [str(turn) for turn in turns_by_key[key]],
                 "summaries": summaries, "section": sections[key]}
 
     def run_stage(task: dict) -> dict:
@@ -2438,10 +2444,13 @@ def _execute_section_unit_processing(run_dir: Path, connection: sqlite3.Connecti
 
     audit_total = len(audit_section_keys)
     audit_section_key_set = set(audit_section_keys)
+    audit_attempt = int(record.get("audit_attempts") or 0) + 1
+    record["audit_attempts"] = audit_attempt
     audit_summary_path = run_dir / "audit-summary.json"
     audit_results_path = run_dir / "audit-results.jsonl"
     audit_summary = {
         "run_id": record["run_id"], "status": "running", "sections_total": audit_total,
+        "audit_attempt": audit_attempt,
         "sections_reused": int(record.get("reused_sections") or 0),
         "sections_skipped_without_physical_data": max(0, len(plan["section_keys"])
             - audit_total - int(record.get("reused_sections") or 0)),
@@ -2539,7 +2548,7 @@ def _execute_section_unit_processing(run_dir: Path, connection: sqlite3.Connecti
     audit_iterator = iter(audit_section_keys)
     audit_next_index = 0
     audit_completed = 0
-    with audit_results_path.open("w", encoding="utf-8", buffering=1) as audit_output:
+    with audit_results_path.open("a", encoding="utf-8", buffering=1) as audit_output:
         with _borrow_executor(process_pool) as audit_pool:
             while True:
                 while len(futures) < workers and not stop_event.is_set():
@@ -2590,13 +2599,24 @@ def _execute_section_unit_processing(run_dir: Path, connection: sqlite3.Connecti
                         audit_json = json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
                         connection.execute("INSERT OR REPLACE INTO section_audits(section_key,result_json,audited_at_utc) VALUES(?,?,?)",
                             (task["section_key"], audit_json, _utc_now()))
-                        audit_output.write(json.dumps({"section": task["section_key"], **compact},
+                        audit_output.write(json.dumps({"recorded_at_utc": _utc_now(),
+                            "audit_attempt": audit_attempt, "section": task["section_key"], **compact},
                             ensure_ascii=False, separators=(",", ":")) + "\n")
                         add_audit_counts(compact)
                     else:
                         audit_failed_sections.add(task["section_key"])
                         audit_summary["sections_failed"] += 1
-                        error_item = {"section": task["section_key"], "error": result.get("error")}
+                        process_id = result.get("process_id")
+                        worker_parameters = {"operation": "section_stage", "stage": "audit",
+                            "run_id": record["run_id"], "job_id": job_id,
+                            "section_key": task["section_key"], "turns": task["turns"],
+                            "all_turns": task.get("all_turns"), "data_root": str(DATA_ROOT)}
+                        error_item = {"recorded_at_utc": _utc_now(), "audit_attempt": audit_attempt,
+                            "section": task["section_key"], "stage": "audit",
+                            "status": "failed", "error": result.get("error"),
+                            "traceback": result.get("traceback"), "process_id": process_id,
+                            "worker_id": f"pid-{process_id}" if process_id else None,
+                            "worker_parameters": worker_parameters}
                         connection.execute("INSERT OR REPLACE INTO section_audits(section_key,result_json,audited_at_utc) VALUES(?,?,?)",
                             (task["section_key"], json.dumps(error_item, ensure_ascii=False), _utc_now()))
                         audit_output.write(json.dumps(error_item, ensure_ascii=False,
@@ -2607,7 +2627,14 @@ def _execute_section_unit_processing(run_dir: Path, connection: sqlite3.Connecti
                     _emit(progress_callback, {"type": "job_finished", "job_id": job_id,
                         "section": task["section_key"], "stage": "Auditoria física", "stage_kind": "audit",
                         "status": "complete" if result["success"] else "failed",
-                        "progress": 100.0, "process_id": result.get("process_id"), "run_id": record["run_id"]})
+                        "progress": 100.0, "process_id": result.get("process_id"),
+                        "worker_id": f"pid-{result.get('process_id')}" if result.get("process_id") else None,
+                        "worker_parameters": ({"operation": "section_stage", "stage": "audit",
+                            "run_id": record["run_id"], "job_id": job_id,
+                            "section_key": task["section_key"], "turns": task["turns"],
+                            "all_turns": task.get("all_turns"), "data_root": str(DATA_ROOT)}),
+                        "error": result.get("error"), "traceback": result.get("traceback"),
+                        "run_id": record["run_id"]})
 
                 now = time.monotonic()
                 if audit_completed == audit_total or audit_completed % 100 == 0 or now - last_audit_report_at >= 2.0:
@@ -2870,15 +2897,26 @@ def _execute_section_unit_processing(run_dir: Path, connection: sqlite3.Connecti
                     if item.get("traceback")), None)
                 task_error = result.get("error") or outcome_error
                 task_traceback = result.get("traceback") or outcome_traceback
+                process_id = result.get("process_id")
+                worker_parameters = {"operation": "section_stage", "stage": task["stage"],
+                    "run_id": record["run_id"], "job_id": job_id,
+                    "section_key": task["section_key"], "turns": task.get("turns"),
+                    "collect_turns": task.get("collect_turns"), "workers": workers,
+                    "data_root": str(DATA_ROOT)}
                 _emit(progress_callback, {"type": "stage_complete", "section": task["section_key"],
                     "stage": task["stage"], "status": "complete" if result["success"] else "failed",
                     "error": task_error, "traceback": task_traceback,
-                    "process_id": result.get("process_id"),
+                    "process_id": process_id,
+                    "worker_id": f"pid-{process_id}" if process_id else None,
+                    "worker_parameters": worker_parameters,
                     "run_id": record["run_id"]})
-                if not result["success"] or task_traceback:
+                if task_traceback:
                     _emit(progress_callback, {"type": "worker_error", "error": task_error,
                         "traceback": task_traceback,
-                        "section": task["section_key"], "run_id": record["run_id"]})
+                        "section": task["section_key"], "stage": task["stage"],
+                        "job_id": job_id, "process_id": process_id,
+                        "worker_id": f"pid-{process_id}" if process_id else None,
+                        "worker_parameters": worker_parameters, "run_id": record["run_id"]})
                     if task["stage"] == "cleanup":
                         cleanup_failed_sections.add(task["section_key"])
                 elif task["stage"] == "cleanup":

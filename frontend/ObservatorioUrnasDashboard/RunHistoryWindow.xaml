@@ -58,7 +58,7 @@
                                 Background="#E6EBF2" Foreground="#24364A" Margin="0,0,0,8" Height="42"
                                 VerticalAlignment="Center" />
                     </Grid>
-                    <TabControl>
+                    <TabControl x:Name="DetailsTabs" SelectionChanged="DetailsTabs_SelectionChanged">
                         <TabItem Header="Resumo">
                             <ScrollViewer x:Name="SummaryScrollViewer" VerticalScrollBarVisibility="Auto"
                                           PreviewMouseWheel="SummaryScrollViewer_PreviewMouseWheel">
@@ -143,37 +143,54 @@
                                 </DataGrid.Columns>
                             </DataGrid>
                         </TabItem>
-                        <TabItem Header="Atividade">
-                            <DataGrid x:Name="EventRows" AutoGenerateColumns="False" IsReadOnly="True"
-                                      CanUserAddRows="False" HeadersVisibility="Column" Margin="8"
-                                      GridLinesVisibility="Horizontal" EnableRowVirtualization="True">
-                                <DataGrid.Columns>
-                                    <DataGridTextColumn Header="Horário" Binding="{Binding When}" Width="150" />
-                                    <DataGridTextColumn Header="Evento" Binding="{Binding Type}" Width="130" />
-                                    <DataGridTextColumn Header="Etapa" Binding="{Binding Stage}" Width="180" />
-                                    <DataGridTextColumn Header="Seção" Binding="{Binding Section}" Width="*" />
-                                    <DataGridTextColumn Header="Estado" Binding="{Binding Status}" Width="100" />
-                                    <DataGridTemplateColumn Header="Mensagem" Width="2*">
-                                        <DataGridTemplateColumn.CellTemplate>
-                                            <DataTemplate>
-                                                <Grid Margin="2">
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="*" />
-                                                        <ColumnDefinition Width="Auto" />
-                                                    </Grid.ColumnDefinitions>
-                                                    <TextBlock Text="{Binding Message}" TextTrimming="CharacterEllipsis"
-                                                               VerticalAlignment="Center" ToolTip="{Binding Message}" />
-                                                    <Button Grid.Column="1" Content="…" ToolTip="Ver detalhes do erro"
-                                                            Visibility="{Binding DetailsVisibility}"
-                                                            Click="ShowErrorDetails_Click" Margin="6,0,0,0"
-                                                            Padding="5,0" Height="24" MinWidth="28"
-                                                            VerticalAlignment="Center" />
-                                                </Grid>
-                                            </DataTemplate>
-                                        </DataGridTemplateColumn.CellTemplate>
-                                    </DataGridTemplateColumn>
-                                </DataGrid.Columns>
-                            </DataGrid>
+                        <TabItem x:Name="ActivityTab" Header="Atividade">
+                            <DockPanel Margin="8">
+                                <DockPanel DockPanel.Dock="Bottom" Margin="0,8,0,0">
+                                    <Button x:Name="NewerActivityButton" Content="Mais recentes"
+                                            Click="NewerActivity_Click" IsEnabled="False"
+                                            Background="#E6EBF2" Foreground="#24364A" />
+                                    <Button x:Name="OlderActivityButton" Content="Anteriores"
+                                            Click="OlderActivity_Click" IsEnabled="False" Margin="8,0,0,0"
+                                            Background="#E6EBF2" Foreground="#24364A" />
+                                    <TextBlock x:Name="ActivityPageInfo" Margin="12,8,0,0"
+                                               VerticalAlignment="Center" Foreground="{StaticResource MutedBrush}"
+                                               Text="Selecione esta aba para carregar as atividades." />
+                                </DockPanel>
+                                <DataGrid x:Name="EventRows" AutoGenerateColumns="False" IsReadOnly="True"
+                                          CanUserAddRows="False" HeadersVisibility="Column"
+                                          GridLinesVisibility="Horizontal" EnableRowVirtualization="True">
+                                    <DataGrid.Columns>
+                                        <DataGridTextColumn Header="Horário" Binding="{Binding When}" Width="150" />
+                                        <DataGridTextColumn Header="Evento" Binding="{Binding Type}" Width="130" />
+                                        <DataGridTextColumn Header="Etapa" Binding="{Binding Stage}" Width="180" />
+                                        <DataGridTextColumn Header="Seção" Binding="{Binding Section}" Width="*" />
+                                        <DataGridTextColumn Header="Estado" Binding="{Binding Status}" Width="100" />
+                                        <DataGridTextColumn Header="Worker / PID" Binding="{Binding Worker}"
+                                                            Width="120" />
+                                        <DataGridTextColumn Header="Parâmetros" Binding="{Binding Parameters}"
+                                                            Width="2*" />
+                                        <DataGridTemplateColumn Header="Mensagem" Width="2*">
+                                            <DataGridTemplateColumn.CellTemplate>
+                                                <DataTemplate>
+                                                    <Grid Margin="2">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="*" />
+                                                            <ColumnDefinition Width="Auto" />
+                                                        </Grid.ColumnDefinitions>
+                                                        <TextBlock Text="{Binding Message}" TextTrimming="CharacterEllipsis"
+                                                                   VerticalAlignment="Center" ToolTip="{Binding Message}" />
+                                                        <Button Grid.Column="1" Content="…" ToolTip="Ver detalhes do erro"
+                                                                Visibility="{Binding DetailsVisibility}"
+                                                                Click="ShowErrorDetails_Click" Margin="6,0,0,0"
+                                                                Padding="5,0" Height="24" MinWidth="28"
+                                                                VerticalAlignment="Center" />
+                                                    </Grid>
+                                                </DataTemplate>
+                                            </DataGridTemplateColumn.CellTemplate>
+                                        </DataGridTemplateColumn>
+                                    </DataGrid.Columns>
+                                </DataGrid>
+                            </DockPanel>
                         </TabItem>
                     </TabControl>
                 </DockPanel>

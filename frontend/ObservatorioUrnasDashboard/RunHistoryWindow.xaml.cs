@@ -21,23 +21,29 @@ public sealed record LabelValue(string Label, string Value);
 public sealed record SectionHistoryItem(string Turn, string Section, string RawStatus, string ExtractStatus, string Error);
 public sealed record BatchHistoryItem(string Index, string BatchId, string Status, string Rows, string Error);
 public sealed record EventHistoryItem(string When, string Type, string Stage, string Section,
-    string Status, string Message, string Traceback)
+    string Status, string Worker, string Parameters, string Message, string Traceback, bool HasErrorDetails)
 {
-    public Visibility DetailsVisibility => string.IsNullOrWhiteSpace(Traceback)
-        ? Visibility.Collapsed : Visibility.Visible;
+    public Visibility DetailsVisibility => HasErrorDetails ? Visibility.Visible : Visibility.Collapsed;
 }
 
 public partial class RunHistoryWindow : Window
 {
     private const int PageSize = 50;
+    private const int ActivityPageSize = 50;
     private readonly PythonUiBackend _backend;
     private readonly CancellationToken _ownerToken;
     private readonly CancellationTokenSource _windowLifetime = new();
     private readonly Dictionary<(string RunId, int Offset), string> _detailsCache = [];
     private CancellationTokenSource? _detailLoad;
+    private CancellationTokenSource? _activityLoad;
     private RunHistoryItem? _selected;
     private int _offset;
     private int _sectionTotal;
+    private readonly List<long?> _activityCursors = [null];
+    private int _activityPageIndex;
+    private bool _activityHasOlder;
+    private long? _activityNextBefore;
+    private string? _activityLoadedRunId;
 
     public NewJobConfiguration? ConfigurationToCopy { get; private set; }
 
@@ -71,11 +77,22 @@ public partial class RunHistoryWindow : Window
         if (RunList.SelectedItem is not RunHistoryItem item) return;
         _selected = item;
         _offset = 0;
+        _activityLoad?.Cancel();
+        _activityCursors.Clear();
+        _activityCursors.Add(null);
+        _activityPageIndex = 0;
+        _activityHasOlder = false;
+        _activityNextBefore = null;
+        _activityLoadedRunId = null;
+        EventRows.ItemsSource = Array.Empty<EventHistoryItem>();
+        ActivityPageInfo.Text = "Selecione esta aba para carregar as atividades.";
+        UpdateActivityPagingControls();
         SelectedTitle.Text = item.Title;
         SelectedStatus.Text = $"{StatusLabel(item.Summary.Status)} · Início {FormatDate(item.Summary.CreatedAt)}";
         CopyParametersButton.IsEnabled = item.Summary.Kind is "collect" or "batch_process" or "reprocess";
         RenderImmediateSummary(item.Summary);
         await LoadDetailsAsync(item, _offset);
+        if (ActivityTab.IsSelected) await LoadActivityPageAsync();
     }
 
     private void RenderImmediateSummary(RunSummary run)
@@ -127,10 +144,6 @@ public partial class RunHistoryWindow : Window
                     Value(row, "row_count"), Value(row, "error"))).ToList();
             else BatchRows.ItemsSource = Array.Empty<BatchHistoryItem>();
 
-            if (root.TryGetProperty("recent_events", out var events) && events.ValueKind == JsonValueKind.Array)
-                EventRows.ItemsSource = events.EnumerateArray().Select(ToActivity).ToList();
-            else EventRows.ItemsSource = Array.Empty<EventHistoryItem>();
-
             if (root.TryGetProperty("section_jobs", out var jobs))
             {
                 _sectionTotal = IntValue(jobs, "total");
@@ -164,6 +177,76 @@ public partial class RunHistoryWindow : Window
     {
         if (_selected is not null && _offset + PageSize < _sectionTotal)
             await LoadDetailsAsync(_selected, _offset + PageSize);
+    }
+
+    private async void DetailsTabs_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (e.OriginalSource is TabControl && ActivityTab.IsSelected
+            && _selected is not null && _activityLoadedRunId != _selected.Summary.RunId)
+            await LoadActivityPageAsync();
+    }
+
+    private async Task LoadActivityPageAsync()
+    {
+        if (_selected is null || _activityPageIndex >= _activityCursors.Count) return;
+        _activityLoad?.Cancel();
+        _activityLoad?.Dispose();
+        _activityLoad = CancellationTokenSource.CreateLinkedTokenSource(_ownerToken, _windowLifetime.Token);
+        var cancellationToken = _activityLoad.Token;
+        ActivityPageInfo.Text = "Carregando atividades…";
+        OlderActivityButton.IsEnabled = false;
+        NewerActivityButton.IsEnabled = false;
+        try
+        {
+            var json = await _backend.GetRunEventsPageAsync(_selected.Summary.RunId,
+                _activityCursors[_activityPageIndex], ActivityPageSize, cancellationToken);
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            var events = root.TryGetProperty("events", out var values)
+                && values.ValueKind == JsonValueKind.Array
+                ? values.EnumerateArray().Select(ToActivity).ToList()
+                : [];
+            EventRows.ItemsSource = events;
+            _activityHasOlder = BoolValue(root, "has_older", false);
+            _activityNextBefore = NullableLongValue(root, "next_before");
+            _activityLoadedRunId = _selected.Summary.RunId;
+            ActivityPageInfo.Text = $"Página {_activityPageIndex + 1} · {events.Count} evento(s)"
+                + (_activityHasOlder ? " · há atividades anteriores" : " · início do histórico");
+            UpdateActivityPagingControls();
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception error)
+        {
+            ActivityPageInfo.Text = $"Falha ao carregar atividades: {error.Message}";
+            UpdateActivityPagingControls();
+        }
+    }
+
+    private async void OlderActivity_Click(object sender, RoutedEventArgs e)
+    {
+        if (_activityPageIndex + 1 < _activityCursors.Count)
+            _activityPageIndex++;
+        else if (_activityHasOlder && _activityNextBefore is long before)
+        {
+            _activityCursors.Add(before);
+            _activityPageIndex++;
+        }
+        else return;
+        await LoadActivityPageAsync();
+    }
+
+    private async void NewerActivity_Click(object sender, RoutedEventArgs e)
+    {
+        if (_activityPageIndex <= 0) return;
+        _activityPageIndex--;
+        await LoadActivityPageAsync();
+    }
+
+    private void UpdateActivityPagingControls()
+    {
+        NewerActivityButton.IsEnabled = _activityPageIndex > 0;
+        OlderActivityButton.IsEnabled = _activityHasOlder
+            || _activityPageIndex + 1 < _activityCursors.Count;
     }
 
     private void CopyParameters_Click(object sender, RoutedEventArgs e)
@@ -206,7 +289,8 @@ public partial class RunHistoryWindow : Window
     private void ShowErrorDetails_Click(object sender, RoutedEventArgs e)
     {
         if ((sender as FrameworkElement)?.DataContext is not EventHistoryItem item) return;
-        var details = new ErrorDetailsWindow(item.Type, item.Message, item.Traceback) { Owner = this };
+        var details = new ErrorDetailsWindow(item.Type, item.Message, item.Traceback,
+            item.Worker, item.Parameters) { Owner = this };
         details.ShowDialog();
     }
 
@@ -248,6 +332,8 @@ public partial class RunHistoryWindow : Window
         _windowLifetime.Cancel();
         _detailLoad?.Cancel();
         _detailLoad?.Dispose();
+        _activityLoad?.Cancel();
+        _activityLoad?.Dispose();
         _windowLifetime.Dispose();
         base.OnClosed(e);
     }
@@ -314,11 +400,27 @@ public partial class RunHistoryWindow : Window
     private static EventHistoryItem ToActivity(JsonElement element)
     {
         var message = Value(element, "message");
-        if (string.IsNullOrWhiteSpace(message)) message = Value(element, "error");
+        var error = Value(element, "error");
+        if (string.IsNullOrWhiteSpace(message)) message = error;
+        var worker = Value(element, "worker_id");
+        if (string.IsNullOrWhiteSpace(worker) && Value(element, "process_id") is { Length: > 0 } processId)
+            worker = $"PID {processId}";
+        var parameters = element.TryGetProperty("worker_parameters", out var workerParameters)
+            && workerParameters.ValueKind == JsonValueKind.Object
+            ? workerParameters.GetRawText() : "";
+        var eventType = Value(element, "type");
+        var eventStatus = Value(element, "status");
+        if (eventType == "stage_complete" && !string.IsNullOrWhiteSpace(error))
+            eventStatus = "failed";
+        var typeLabel = eventType == "stage_complete"
+            ? eventStatus == "failed" ? "Etapa falhou" : "Etapa concluída"
+            : Humanize(eventType);
         return new EventHistoryItem(FormatDate(Value(element, "recorded_at_utc")),
-            Humanize(Value(element, "type")), Value(element, "stage"),
+            typeLabel, Value(element, "stage"),
             FormatSection(Value(element, "section"), Value(element, "turn")),
-            StatusLabel(Value(element, "status")), message, Value(element, "traceback"));
+            StatusLabel(eventStatus), worker, parameters, message,
+            Value(element, "traceback"), !string.IsNullOrWhiteSpace(error)
+                || !string.IsNullOrWhiteSpace(Value(element, "traceback")));
     }
 
     private static string FormatSection(string section, string turn) =>
@@ -369,6 +471,9 @@ public partial class RunHistoryWindow : Window
     private static int? NullableIntValue(JsonElement element, string property) =>
         element.ValueKind == JsonValueKind.Object && element.TryGetProperty(property, out var value)
         && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var result) ? result : null;
+    private static long? NullableLongValue(JsonElement element, string property) =>
+        element.ValueKind == JsonValueKind.Object && element.TryGetProperty(property, out var value)
+        && value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out var result) ? result : null;
     private static bool BoolValue(JsonElement element, string property, bool fallback) =>
         element.ValueKind == JsonValueKind.Object && element.TryGetProperty(property, out var value)
         && value.ValueKind is JsonValueKind.True or JsonValueKind.False ? value.GetBoolean() : fallback;

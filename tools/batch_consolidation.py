@@ -135,8 +135,10 @@ def _cargo(entries: Iterable[dict], *, is_bu: bool) -> dict | None:
             code = entry.get("cargo")
             if str(code) == "1" or str(code).casefold() == "presidente":
                 return entry
-        elif str(entry.get("cargo_code")) == "1" and entry.get("cargo_kind") == "cargoConstitucional":
-            return entry
+        elif entry.get("cargo_kind") == "cargoConstitucional":
+            code = str(entry.get("cargo_code", "")).casefold()
+            if code in {"1", "presidente"}:
+                return entry
     return None
 
 

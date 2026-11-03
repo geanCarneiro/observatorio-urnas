@@ -432,6 +432,64 @@ def _tail_jsonl(path: Path, limit: int = 100) -> list[dict]:
     return result
 
 
+def _page_jsonl_from_end(path: Path, before: int | None, limit: int) -> dict:
+    """Read one newest-first page from a JSONL file without loading its history."""
+    if not path.is_file():
+        return {"events": [], "before": 0, "next_before": None, "has_older": False}
+    file_size = path.stat().st_size
+    end = min(file_size, file_size if before is None else max(0, int(before)))
+    position = end
+    buffer = b""
+    chunk_size = 65536
+    while position > 0 and buffer.count(b"\n") <= limit:
+        size = min(chunk_size, position)
+        position -= size
+        with path.open("rb") as source:
+            source.seek(position)
+            buffer = source.read(size) + buffer
+
+    chunks = buffer.splitlines(keepends=True)
+    skipped_partial_start = position > 0 and bool(chunks) and not chunks[0].endswith(b"\n")
+    base_offset = position
+    if skipped_partial_start:
+        base_offset += len(chunks.pop(0))
+    if chunks and not chunks[-1].endswith(b"\n"):
+        chunks.pop()
+
+    offsets = []
+    current_offset = base_offset
+    for chunk in chunks:
+        offsets.append(current_offset)
+        current_offset += len(chunk)
+    first_index = max(0, len(chunks) - limit)
+    selected = chunks[first_index:]
+    selected_offsets = offsets[first_index:]
+    events = []
+    for raw_line in selected:
+        try:
+            events.append(json.loads(raw_line.decode("utf-8")))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+    next_before = selected_offsets[0] if selected_offsets else None
+    has_older = bool(next_before and (next_before > 0 or skipped_partial_start))
+    return {"events": events, "before": end, "next_before": next_before,
+            "has_older": has_older}
+
+
+def _run_event_page(run_id: str, before: int | None, limit: int) -> dict:
+    if not run_id or Path(run_id).name != run_id or "/" in run_id or "\\" in run_id:
+        raise ValueError("run_id inválido")
+    runs_root = (STATE_ROOT / "runs").resolve()
+    run_dir = (runs_root / run_id).resolve()
+    if run_dir.parent != runs_root:
+        raise ValueError("run_id inválido")
+    if not (run_dir / "run.json").is_file():
+        raise FileNotFoundError("execução local não encontrada")
+    page = _page_jsonl_from_end(run_dir / "events.jsonl", before, limit)
+    page["run_id"] = run_id
+    return page
+
+
 def _run_details(run_id: str, offset: int = 0, limit: int = 50, *, compact: bool = False) -> dict:
     if not run_id or Path(run_id).name != run_id or "/" in run_id or "\\" in run_id:
         raise ValueError("run_id inválido")
@@ -509,7 +567,8 @@ def _run_details(run_id: str, offset: int = 0, limit: int = 50, *, compact: bool
     else:
         batch_states = []
     return {"run": run, "plan": plan, "batch_states": batch_states, "state_counts": state_counts,
-            "section_jobs": section_jobs, "recent_events": _tail_jsonl(run_dir / "events.jsonl")}
+            "section_jobs": section_jobs,
+            "recent_events": [] if compact else _tail_jsonl(run_dir / "events.jsonl")}
 
 
 class JobHandler(BaseHTTPRequestHandler):
@@ -668,8 +727,21 @@ class JobHandler(BaseHTTPRequestHandler):
             self._json(200, self._state_snapshot(since))
             return
         if parsed.path.startswith("/api/runs/"):
-            run_id = unquote(parsed.path.removeprefix("/api/runs/"))
+            run_path = unquote(parsed.path.removeprefix("/api/runs/"))
             query = parse_qs(parsed.query)
+            if run_path.endswith("/events"):
+                run_id = run_path.removesuffix("/events")
+                try:
+                    before_value = query.get("before", [None])[0]
+                    before = int(before_value) if before_value is not None else None
+                    limit = min(200, max(1, int(query.get("limit", ["50"])[0])))
+                    self._json(200, _run_event_page(run_id, before, limit))
+                except FileNotFoundError as error:
+                    self._json(404, {"error": str(error)})
+                except (ValueError, OSError, json.JSONDecodeError) as error:
+                    self._json(400, {"error": str(error)})
+                return
+            run_id = run_path
             try:
                 offset = max(0, int(query.get("offset", ["0"])[0]))
                 limit = min(100, max(1, int(query.get("limit", ["50"])[0])))

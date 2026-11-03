@@ -7,6 +7,11 @@
         <SolidColorBrush x:Key="CardBackground" Color="#FFFFFF" />
         <SolidColorBrush x:Key="AccentBrush" Color="#2864B4" />
         <SolidColorBrush x:Key="MutedBrush" Color="#617084" />
+        <Style TargetType="DataGrid">
+            <Setter Property="SelectionUnit" Value="CellOrRowHeader" />
+            <Setter Property="SelectionMode" Value="Extended" />
+            <Setter Property="ClipboardCopyMode" Value="IncludeHeader" />
+        </Style>
         <Style TargetType="Button">
             <Setter Property="Padding" Value="12,8" />
             <Setter Property="Margin" Value="0,0,0,8" />

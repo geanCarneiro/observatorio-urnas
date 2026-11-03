@@ -8,6 +8,7 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
@@ -16,10 +17,15 @@
         <TextBox x:Name="ErrorMessage" Grid.Row="1" IsReadOnly="True" TextWrapping="Wrap"
                  VerticalScrollBarVisibility="Auto" MinHeight="44" MaxHeight="100"
                  Padding="8" Margin="0,0,0,12" />
-        <TextBox x:Name="TracebackText" Grid.Row="2" IsReadOnly="True" AcceptsReturn="True"
+        <StackPanel Grid.Row="2" Margin="0,0,0,12">
+            <TextBlock Text="Worker e parâmetros" FontWeight="SemiBold" Margin="0,0,0,4" />
+            <TextBox x:Name="ErrorContext" IsReadOnly="True" AcceptsReturn="True"
+                     TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" MaxHeight="120" Padding="8" />
+        </StackPanel>
+        <TextBox x:Name="TracebackText" Grid.Row="3" IsReadOnly="True" AcceptsReturn="True"
                  TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto"
                  HorizontalScrollBarVisibility="Auto" FontFamily="Consolas" Padding="8" />
-        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
             <Button Content="Copiar detalhes" Click="CopyDetails_Click" Margin="0,0,8,0" />
             <Button Content="Fechar" Click="Close_Click" Background="#E6EBF2" Foreground="#24364A"
                     Margin="0" />

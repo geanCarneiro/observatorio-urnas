@@ -348,6 +348,7 @@ def main(argv: list[str] | None = None) -> int:
                 detected_format="JWS compact", context={"sha256": run.get("manifest_sha256")}))
 
     listed_types = set()
+    reused_source_paths: dict[tuple[str, str], Path] = {}
     progress_file_positions = {}
     if payload is not None and isinstance(payload.get("hashes"), list):
         for entry_index, entry in enumerate(payload["hashes"]):
@@ -477,6 +478,7 @@ def main(argv: list[str] | None = None) -> int:
                         state.update({key: value for key, value in existing_entry.items()
                                       if key in {"http", "size_bytes", "sha256"}})
                         state["reused_local"] = True
+                        reused_source_paths[(file_type, name)] = existing_path
                         run["files"].append(state.copy())
                         run["file_states"].append(file_state(file_type=file_type, name=name, section=key,
                             status="downloaded", path=str(relative), sha256=state.get("sha256"),
@@ -561,16 +563,19 @@ def main(argv: list[str] | None = None) -> int:
     detected_turn = None
     bu_entry = next((item for item in run["files"] if item.get("type") == "bu"), None)
     if bu_entry:
+        bu_source_path = reused_source_paths.get(("bu", bu_entry.get("name")))
+        if bu_source_path is None:
+            bu_source_path = root / bu_entry["relative_path"]
         try:
             from analyze_section import decode_bu
-            bu_data = decode_bu(root / bu_entry["relative_path"], Path(__file__).resolve().parent.parent / "schemas/bu.asn1")
+            bu_data = decode_bu(bu_source_path, Path(__file__).resolve().parent.parent / "schemas/bu.asn1")
             pleito_id = bu_data.get("pleito_id")
             detected_turn = bu_data.get("turno")
         except Exception as error:
             run["diagnostics"].append(diagnostic(code="COLLECT_TURN_DETECTION_FAILED", stage="semantic_validation",
                 operation="read_bu_electoral_identifier", error_type="semantic_validation", cause=str(error),
                 recoverability="indeterminate", section=key, file_type="bu", file_name=bu_entry.get("name"),
-                file_path=str(root / bu_entry["relative_path"]), exception=error,
+                file_path=str(bu_source_path), exception=error,
                 context={"data_id": args.data_id, "turn_detection_source": "BU ASN.1 header"}))
     expected_turn = {"3220": 1, "3221": 2}.get(args.data_id)
     if detected_turn is not None and expected_turn is not None and detected_turn != expected_turn:
