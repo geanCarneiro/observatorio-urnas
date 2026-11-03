@@ -74,7 +74,19 @@ public partial class RunHistoryWindow : Window
 
     private async void RunList_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
     {
-        if (RunList.SelectedItem is not RunHistoryItem item) return;
+        if (RunList.SelectedItem is RunHistoryItem item)
+            await SelectRunAsync(item);
+    }
+
+    private async void RunList_CurrentCellChanged(object? sender, EventArgs e)
+    {
+        if (RunList.CurrentCell.Item is RunHistoryItem item)
+            await SelectRunAsync(item);
+    }
+
+    private async Task SelectRunAsync(RunHistoryItem item)
+    {
+        if (ReferenceEquals(_selected, item)) return;
         _selected = item;
         _offset = 0;
         _activityLoad?.Cancel();
@@ -92,6 +104,7 @@ public partial class RunHistoryWindow : Window
         CopyParametersButton.IsEnabled = item.Summary.Kind is "collect" or "batch_process" or "reprocess";
         RenderImmediateSummary(item.Summary);
         await LoadDetailsAsync(item, _offset);
+        if (_selected?.Summary.RunId != item.Summary.RunId) return;
         if (ActivityTab.IsSelected) await LoadActivityPageAsync();
     }
 
@@ -129,9 +142,13 @@ public partial class RunHistoryWindow : Window
             if (!_detailsCache.TryGetValue(cacheKey, out var json))
             {
                 json = await _backend.GetRunDetailsAsync(item.Summary.RunId, offset, PageSize, cancellationToken);
+                if (cancellationToken.IsCancellationRequested
+                    || _selected?.Summary.RunId != item.Summary.RunId) return;
                 if (_detailsCache.Count > 20) _detailsCache.Clear();
                 _detailsCache[cacheKey] = json;
             }
+            if (cancellationToken.IsCancellationRequested
+                || _selected?.Summary.RunId != item.Summary.RunId) return;
             using var document = JsonDocument.Parse(json);
             var root = document.RootElement;
 
@@ -165,7 +182,12 @@ public partial class RunHistoryWindow : Window
             HistoryMessage.Text = $"Detalhes de {item.Summary.RunId} carregados.";
         }
         catch (OperationCanceledException) { }
-        catch (Exception error) { HistoryMessage.Text = error.Message; }
+        catch (Exception error)
+        {
+            if (!cancellationToken.IsCancellationRequested
+                && _selected?.Summary.RunId == item.Summary.RunId)
+                HistoryMessage.Text = error.Message;
+        }
     }
 
     private async void PreviousPage_Click(object sender, RoutedEventArgs e)
@@ -189,6 +211,9 @@ public partial class RunHistoryWindow : Window
     private async Task LoadActivityPageAsync()
     {
         if (_selected is null || _activityPageIndex >= _activityCursors.Count) return;
+        var selectedRunId = _selected.Summary.RunId;
+        var selectedPageIndex = _activityPageIndex;
+        var cursor = _activityCursors[selectedPageIndex];
         _activityLoad?.Cancel();
         _activityLoad?.Dispose();
         _activityLoad = CancellationTokenSource.CreateLinkedTokenSource(_ownerToken, _windowLifetime.Token);
@@ -198,8 +223,11 @@ public partial class RunHistoryWindow : Window
         NewerActivityButton.IsEnabled = false;
         try
         {
-            var json = await _backend.GetRunEventsPageAsync(_selected.Summary.RunId,
-                _activityCursors[_activityPageIndex], ActivityPageSize, cancellationToken);
+            var json = await _backend.GetRunEventsPageAsync(selectedRunId,
+                cursor, ActivityPageSize, cancellationToken);
+            if (cancellationToken.IsCancellationRequested
+                || _selected?.Summary.RunId != selectedRunId
+                || _activityPageIndex != selectedPageIndex) return;
             using var document = JsonDocument.Parse(json);
             var root = document.RootElement;
             var events = root.TryGetProperty("events", out var values)
@@ -209,7 +237,7 @@ public partial class RunHistoryWindow : Window
             EventRows.ItemsSource = events;
             _activityHasOlder = BoolValue(root, "has_older", false);
             _activityNextBefore = NullableLongValue(root, "next_before");
-            _activityLoadedRunId = _selected.Summary.RunId;
+            _activityLoadedRunId = selectedRunId;
             ActivityPageInfo.Text = $"Página {_activityPageIndex + 1} · {events.Count} evento(s)"
                 + (_activityHasOlder ? " · há atividades anteriores" : " · início do histórico");
             UpdateActivityPagingControls();
@@ -217,8 +245,13 @@ public partial class RunHistoryWindow : Window
         catch (OperationCanceledException) { }
         catch (Exception error)
         {
-            ActivityPageInfo.Text = $"Falha ao carregar atividades: {error.Message}";
-            UpdateActivityPagingControls();
+            if (!cancellationToken.IsCancellationRequested
+                && _selected?.Summary.RunId == selectedRunId
+                && _activityPageIndex == selectedPageIndex)
+            {
+                ActivityPageInfo.Text = $"Falha ao carregar atividades: {error.Message}";
+                UpdateActivityPagingControls();
+            }
         }
     }
 

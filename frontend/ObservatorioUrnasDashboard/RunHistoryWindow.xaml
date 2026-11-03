@@ -29,6 +29,7 @@
                                TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" Margin="2,8,2,2" />
                     <DataGrid x:Name="RunList" AutoGenerateColumns="False" IsReadOnly="True"
                               SelectionMode="Single" SelectionChanged="RunList_SelectionChanged"
+                              CurrentCellChanged="RunList_CurrentCellChanged"
                               HeadersVisibility="Column" GridLinesVisibility="Horizontal">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Execução" Binding="{Binding Title}" Width="*" />
