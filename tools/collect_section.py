@@ -235,7 +235,7 @@ def canonical_manifest_file_type(raw_type: object, name: object) -> str:
     return raw_type if isinstance(raw_type, str) else "unknown"
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--uf", required=True, type=lambda x: x.lower())
     parser.add_argument("--municipio", required=True)
@@ -248,7 +248,7 @@ def main() -> int:
     parser.add_argument("--incremental", action="store_true",
                         help="reuse already present files whose current manifest hash and local size match")
     parser.add_argument("--progress-jsonl", action="store_true", help=argparse.SUPPRESS)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if not re.fullmatch(r"[a-z]{2}", args.uf):
         parser.error("UF must be a two-letter code")
     municipality = identifier(args.municipio, 5, "municipio")

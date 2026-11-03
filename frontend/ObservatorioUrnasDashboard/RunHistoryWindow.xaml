@@ -1,0 +1,183 @@
+<Window x:Class="ObservatorioUrnasDashboard.RunHistoryWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Histórico de execuções" Width="1320" Height="820"
+        MinWidth="1000" MinHeight="650" WindowStartupLocation="CenterOwner"
+        Background="{StaticResource AppBackground}" Loaded="Window_Loaded">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+        <DockPanel Grid.Row="0" Margin="0,0,0,12">
+            <Button Content="Fechar" Click="Close_Click" DockPanel.Dock="Right"
+                    Background="#E6EBF2" Foreground="#24364A" />
+            <TextBlock Text="Histórico de execuções" FontSize="22" FontWeight="Bold"
+                       Foreground="#1C2A3A" VerticalAlignment="Center" />
+        </DockPanel>
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="330" />
+                <ColumnDefinition Width="12" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <Border Grid.Column="0" Background="{StaticResource CardBackground}" CornerRadius="9" Padding="10">
+                <DockPanel>
+                    <TextBlock DockPanel.Dock="Top" Text="Execuções recentes" FontWeight="Bold"
+                               FontSize="16" Margin="2,2,2,10" Foreground="#24364A" />
+                    <TextBlock x:Name="HistoryMessage" DockPanel.Dock="Bottom" Text="Carregando…"
+                               TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" Margin="2,8,2,2" />
+                    <DataGrid x:Name="RunList" AutoGenerateColumns="False" IsReadOnly="True"
+                              SelectionMode="Single" SelectionChanged="RunList_SelectionChanged"
+                              HeadersVisibility="Column" GridLinesVisibility="Horizontal">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Execução" Binding="{Binding Title}" Width="*" />
+                            <DataGridTextColumn Header="Estado" Binding="{Binding Status}" Width="85" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </DockPanel>
+            </Border>
+            <Border Grid.Column="2" Background="{StaticResource CardBackground}" CornerRadius="9" Padding="14">
+                <DockPanel>
+                    <Grid DockPanel.Dock="Top" Margin="0,0,0,10">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel>
+                            <TextBlock x:Name="SelectedTitle" Text="Selecione uma execução"
+                                       FontWeight="Bold" FontSize="17" Foreground="#24364A" />
+                            <TextBlock x:Name="SelectedStatus" Margin="0,4,0,0"
+                                       Foreground="{StaticResource MutedBrush}" />
+                        </StackPanel>
+                        <Button x:Name="CopyParametersButton" Grid.Column="1" Content="Copiar parâmetros para novo job"
+                                Click="CopyParameters_Click" IsEnabled="False" Margin="0,0,8,8" Height="42"
+                                VerticalAlignment="Center" />
+                        <Button Grid.Column="2" Content="Atualizar" Click="Refresh_Click"
+                                Background="#E6EBF2" Foreground="#24364A" Margin="0,0,0,8" Height="42"
+                                VerticalAlignment="Center" />
+                    </Grid>
+                    <TabControl>
+                        <TabItem Header="Resumo">
+                            <ScrollViewer x:Name="SummaryScrollViewer" VerticalScrollBarVisibility="Auto"
+                                          PreviewMouseWheel="SummaryScrollViewer_PreviewMouseWheel">
+                                <StackPanel Margin="8">
+                                    <TextBlock Text="Execução" FontWeight="Bold" Margin="0,0,0,5" />
+                                    <DataGrid x:Name="RunInfoRows" AutoGenerateColumns="False" IsReadOnly="True"
+                                              CanUserAddRows="False" HeadersVisibility="Column" Height="230"
+                                              GridLinesVisibility="Horizontal" EnableRowVirtualization="True">
+                                        <DataGrid.Columns>
+                                            <DataGridTextColumn Header="Campo" Binding="{Binding Label}" Width="210" />
+                                            <DataGridTextColumn Header="Valor" Binding="{Binding Value}" Width="*" />
+                                        </DataGrid.Columns>
+                                    </DataGrid>
+                                    <TextBlock Text="Parâmetros" FontWeight="Bold" Margin="0,12,0,5" />
+                                    <DataGrid x:Name="ParameterRows" AutoGenerateColumns="False" IsReadOnly="True"
+                                              CanUserAddRows="False" HeadersVisibility="Column" Height="240"
+                                              GridLinesVisibility="Horizontal" EnableRowVirtualization="True">
+                                        <DataGrid.Columns>
+                                            <DataGridTextColumn Header="Parâmetro" Binding="{Binding Label}" Width="210" />
+                                            <DataGridTextColumn Header="Valor" Binding="{Binding Value}" Width="*" />
+                                        </DataGrid.Columns>
+                                    </DataGrid>
+                                    <TextBlock Text="Contagens" FontWeight="Bold" Margin="0,12,0,5" />
+                                    <DataGrid x:Name="CountRows" AutoGenerateColumns="False" IsReadOnly="True"
+                                              CanUserAddRows="False" HeadersVisibility="Column" Height="240"
+                                              GridLinesVisibility="Horizontal" EnableRowVirtualization="True">
+                                        <DataGrid.Columns>
+                                            <DataGridTextColumn Header="Estado" Binding="{Binding Label}" Width="*" />
+                                            <DataGridTextColumn Header="Quantidade" Binding="{Binding Value}" Width="150" />
+                                        </DataGrid.Columns>
+                                    </DataGrid>
+                                </StackPanel>
+                            </ScrollViewer>
+                        </TabItem>
+                        <TabItem Header="Plano">
+                            <DockPanel Margin="8">
+                                <TextBlock DockPanel.Dock="Top" Text="Resumo do plano salvo" FontWeight="Bold"
+                                           Margin="0,0,0,8" />
+                                <DataGrid x:Name="PlanRows" AutoGenerateColumns="False" IsReadOnly="True"
+                                          CanUserAddRows="False" HeadersVisibility="Column"
+                                          GridLinesVisibility="Horizontal" EnableRowVirtualization="True">
+                                    <DataGrid.Columns>
+                                        <DataGridTextColumn Header="Campo" Binding="{Binding Label}" Width="240" />
+                                        <DataGridTextColumn Header="Valor" Binding="{Binding Value}" Width="*" />
+                                    </DataGrid.Columns>
+                                </DataGrid>
+                            </DockPanel>
+                        </TabItem>
+                        <TabItem Header="Seções">
+                            <DockPanel Margin="8">
+                                <DockPanel DockPanel.Dock="Bottom" Margin="0,8,0,0">
+                                    <Button x:Name="PreviousPageButton" Content="Anterior" Click="PreviousPage_Click"
+                                            IsEnabled="False" Background="#E6EBF2" Foreground="#24364A" />
+                                    <Button x:Name="NextPageButton" Content="Próxima" Click="NextPage_Click"
+                                            IsEnabled="False" Margin="8,0,0,0" Background="#E6EBF2" Foreground="#24364A" />
+                                    <TextBlock x:Name="PageInfo" Margin="12,8,0,0" VerticalAlignment="Center"
+                                               Foreground="{StaticResource MutedBrush}" />
+                                </DockPanel>
+                                <DataGrid x:Name="SectionRows" AutoGenerateColumns="False" IsReadOnly="True"
+                                          CanUserAddRows="False" HeadersVisibility="Column"
+                                          GridLinesVisibility="Horizontal" EnableRowVirtualization="True">
+                                    <DataGrid.Columns>
+                                        <DataGridTextColumn Header="Turno" Binding="{Binding Turn}" Width="60" />
+                                        <DataGridTextColumn Header="Seção" Binding="{Binding Section}" Width="*" />
+                                        <DataGridTextColumn Header="Coleta" Binding="{Binding RawStatus}" Width="110" />
+                                        <DataGridTextColumn Header="Extração" Binding="{Binding ExtractStatus}" Width="110" />
+                                        <DataGridTextColumn Header="Erro" Binding="{Binding Error}" Width="2*" />
+                                    </DataGrid.Columns>
+                                </DataGrid>
+                            </DockPanel>
+                        </TabItem>
+                        <TabItem Header="Remessas">
+                            <DataGrid x:Name="BatchRows" AutoGenerateColumns="False" IsReadOnly="True"
+                                      CanUserAddRows="False" HeadersVisibility="Column" Margin="8"
+                                      GridLinesVisibility="Horizontal" EnableRowVirtualization="True">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Índice" Binding="{Binding Index}" Width="70" />
+                                    <DataGridTextColumn Header="Remessa" Binding="{Binding BatchId}" Width="140" />
+                                    <DataGridTextColumn Header="Estado" Binding="{Binding Status}" Width="120" />
+                                    <DataGridTextColumn Header="Linhas" Binding="{Binding Rows}" Width="90" />
+                                    <DataGridTextColumn Header="Erro" Binding="{Binding Error}" Width="*" />
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </TabItem>
+                        <TabItem Header="Atividade">
+                            <DataGrid x:Name="EventRows" AutoGenerateColumns="False" IsReadOnly="True"
+                                      CanUserAddRows="False" HeadersVisibility="Column" Margin="8"
+                                      GridLinesVisibility="Horizontal" EnableRowVirtualization="True">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Horário" Binding="{Binding When}" Width="150" />
+                                    <DataGridTextColumn Header="Evento" Binding="{Binding Type}" Width="130" />
+                                    <DataGridTextColumn Header="Etapa" Binding="{Binding Stage}" Width="180" />
+                                    <DataGridTextColumn Header="Seção" Binding="{Binding Section}" Width="*" />
+                                    <DataGridTextColumn Header="Estado" Binding="{Binding Status}" Width="100" />
+                                    <DataGridTemplateColumn Header="Mensagem" Width="2*">
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <Grid Margin="2">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="Auto" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <TextBlock Text="{Binding Message}" TextTrimming="CharacterEllipsis"
+                                                               VerticalAlignment="Center" ToolTip="{Binding Message}" />
+                                                    <Button Grid.Column="1" Content="…" ToolTip="Ver detalhes do erro"
+                                                            Visibility="{Binding DetailsVisibility}"
+                                                            Click="ShowErrorDetails_Click" Margin="6,0,0,0"
+                                                            Padding="5,0" Height="24" MinWidth="28"
+                                                            VerticalAlignment="Center" />
+                                                </Grid>
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </TabItem>
+                    </TabControl>
+                </DockPanel>
+            </Border>
+        </Grid>
+    </Grid>
+</Window>

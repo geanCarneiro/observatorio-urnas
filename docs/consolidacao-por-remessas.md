@@ -1,22 +1,24 @@
-# Consolidação determinística por remessas
+# Auditoria e conciliação determinísticas do conjunto local
 
 ## Objetivo
 
-Processar aquisições localmente em grupos limitados, produzir uma linha compacta por seção/turno e limpar os arquivos brutos antes de avançar. A rotina não usa IA e não grava extrações JSON detalhadas de BU, RDV ou log.
+Reutilizar resultados de seção confirmados, validar somente sessões pendentes cujo estado físico seja necessário e coletar ou conciliar o que faltar. A execução produz uma linha compacta por seção/turno e não usa IA nem grava extrações JSON detalhadas de BU, RDV ou log.
 
 ## Ciclo e armazenamento
 
-- Estado da execução, inventário, plano e retomada: `.estado-local/runs/<run_id>/`.
-- Dados brutos temporários de uma remessa: `dados/`.
-- Resultado durável, separado por estado: `consolidados/<run_id>/<UF>/remessa-NNNNN/consolidacao.csv` e `manifest.json`.
-- Índice final de cada remessa: `consolidados/<run_id>/_remessas/remessa-NNNNN.json`.
-- Evidência bruta que exige inspeção: `consolidados/<run_id>/evidencias/remessa-NNNNN/<uf>/<municipio>/<zona>/<secao>/`.
+- Estado da execução, inventário, plano, auditoria e retomada: `.estado-local/runs/<run_id>/`.
+- Resumo e decisões físicas da auditoria: `audit-summary.json` e `audit-results.jsonl` dentro da pasta da execução.
+- Dados brutos: `dados/`.
+- Resultado durável, separado por estado, município e zona: `consolidados/<run_id>/<UF>/<municipio>/<zona>.csv` e manifesto correspondente.
+- Evidência bruta que exige inspeção: `consolidados/<run_id>/evidencias/<uf>/<municipio>/<zona>/<secao>/`.
 
-O início exige confirmação para limpar todo o conteúdo de `dados/`. Após cada remessa, a limpeza só ocorre depois de gravar atomicamente o CSV e o manifest e preservar evidências de anomalia verdadeira/indeterminada ou processamento incompleto. Uma falha antes dessa etapa mantém os brutos para retomada.
+Os dados brutos são temporários: após a consolidação segura e a preservação de evidências necessárias, a árvore da seção é removida. Um job novo pode reutilizar resultados compatíveis do job por remessas anterior, que ficam em `.estado-local` e `consolidados`, fora de `dados/`. A consolidação confirmada é registrada por seção/turno no SQLite da execução, com hash do resumo; esse marcador permite reutilizar o resultado sem repetir auditoria física quando não há estado físico incerto. Execuções antigas sem o marcador são migradas a partir de resumos válidos já persistidos.
 
-Uma única fila contínua contém as seções da remessa. Cada worker executa o fluxo completo de uma seção: coleta dos arquivos brutos quando necessário, análise determinística e gravação do resumo compacto em SQLite. Assim, enquanto um worker coleta, outros podem analisar seções diferentes. O número configurado limita quantas seções avançam simultaneamente, não uma etapa específica. O uso de memória cresce com a quantidade de workers e com o tamanho das aquisições processadas simultaneamente.
+Workers paralelos auditam somente sessões pendentes com dados físicos ou estado incerto por falha/interrupção. Se uma sessão pendente não possui árvore física nem tentativa incerta, ela vai diretamente para coleta; resultados confirmados são reutilizados do estado persistido, não de `dados/`. Na retomada, o job mantém seu próprio estado e verifica somente sessões sem marcador confiável ou com arquivos físicos que ainda precisem de validação antes da limpeza. A parada segura registra os estados concluídos; após queda do processo ou da máquina, a próxima execução coleta e reconcilia novamente as seções incertas.
 
-Quando todas as seções da remessa têm um resumo persistido, um worker finalizador reúne os resultados, grava um CSV e manifesto para cada estado presente e cria um índice da remessa. A limpeza dos dados brutos só ocorre depois dos arquivos por estado, do índice e das evidências necessárias estarem duráveis.
+Depois da verificação direcionada, as seções que precisam de coleta ou conciliação entram na fila. Os workers continuam sendo usados em paralelo; a fila é alimentada por checkpoints internos para limitar tarefas residentes na memória. Esses checkpoints não são fases ou remessas visíveis na UI. Cada seção tem no máximo uma etapa ativa por vez, pois seus arquivos de log são compartilhados pelos turnos. Uma coleta necessária é seguida da conciliação determinística dessa seção; se os dados brutos já estiverem íntegros, apenas a conciliação necessária é executada.
+
+Os resultados por seção/turno são gravados no SQLite local da execução. Ao final, um finalizador escreve os CSVs finais por estado, município e zona e o manifesto geral. A limpeza de cada árvore bruta exige validação física adicional e só ocorre depois que os resumos e as evidências necessárias estiverem duráveis. Falhas de auditoria ou processamento deixam a execução parcial e preservam os dados necessários para inspeção ou retomada.
 
 ## Proxy de horário regular
 

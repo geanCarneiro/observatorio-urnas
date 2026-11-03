@@ -90,6 +90,45 @@ def clean_data_root(data_root: Path, project_root: Path) -> int:
     return removed
 
 
+def clean_section_data(data_root: Path, project_root: Path, section: dict) -> int:
+    """Remove one verified physical section tree without touching sibling sections."""
+    project_root = project_root.resolve()
+    expected_root = project_root / "dados"
+    data_root = data_root.absolute()
+    if data_root != expected_root or data_root.resolve() != expected_root:
+        raise ValueError(f"refusing to clean unexpected data root: {data_root}")
+    parts = [str(section.get(name, "")) for name in ("uf", "municipio", "zona", "secao")]
+    if any(not value or value in {".", ".."} or "/" in value or "\\" in value for value in parts):
+        raise ValueError("refusing to clean section with unsafe path components")
+    target = data_root.joinpath(*parts)
+    if not target.exists():
+        return 0
+    if _reparse_point(data_root):
+        raise ValueError(f"refusing to clean reparse-point data root: {data_root}")
+    current = data_root
+    for component in parts:
+        current = current / component
+        if not current.exists():
+            return 0
+        if _reparse_point(current):
+            raise ValueError(f"refusing to clean reparse point in section path: {current}")
+    resolved_target = target.resolve()
+    try:
+        resolved_target.relative_to(data_root.resolve())
+    except ValueError as error:
+        raise ValueError(f"refusing to clean section outside data root: {target}") from error
+    if not target.is_dir():
+        target.unlink()
+    else:
+        for current_path, directories, files in os.walk(target, topdown=True, followlinks=False):
+            for name in directories + files:
+                candidate = Path(current_path) / name
+                if _reparse_point(candidate):
+                    raise ValueError(f"refusing to clean reparse point inside section: {candidate}")
+        shutil.rmtree(target)
+    return 1
+
+
 def _cargo(entries: Iterable[dict], *, is_bu: bool) -> dict | None:
     for entry in entries:
         if is_bu:
@@ -370,3 +409,33 @@ def preserve_section_evidence(source_root: Path, destination_root: Path, section
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source, destination, dirs_exist_ok=True)
     return destination
+
+
+def verify_tree_copy(source: Path, destination: Path) -> dict:
+    """Verify a preserved evidence tree has exactly the same files and bytes as its source."""
+    def inventory(root: Path) -> dict[str, tuple[int, str]]:
+        if not root.is_dir() or _reparse_point(root):
+            raise ValueError(f"evidence tree is absent or unsafe: {root}")
+        result = {}
+        for current, directories, files in os.walk(root, topdown=True, followlinks=False):
+            current_path = Path(current)
+            for name in directories:
+                if _reparse_point(current_path / name):
+                    raise ValueError(f"evidence tree contains a reparse point: {current_path / name}")
+            for name in files:
+                path = current_path / name
+                if _reparse_point(path) or not path.is_file():
+                    raise ValueError(f"evidence tree contains an unsafe file: {path}")
+                result[path.relative_to(root).as_posix()] = (path.stat().st_size, _sha256_file(path))
+        return result
+
+    source_files = inventory(source)
+    destination_files = inventory(destination)
+    if source_files != destination_files:
+        missing = sorted(set(source_files) - set(destination_files))
+        extra = sorted(set(destination_files) - set(source_files))
+        changed = sorted(path for path in set(source_files) & set(destination_files)
+                         if source_files[path] != destination_files[path])
+        raise ValueError(f"evidence copy differs from source: missing={len(missing)}, extra={len(extra)}, changed={len(changed)}")
+    return {"verified_files": len(source_files),
+            "verified_bytes": sum(size for size, _digest in source_files.values())}

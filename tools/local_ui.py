@@ -20,8 +20,7 @@ if str(TOOLS_ROOT) not in sys.path:
     sys.path.insert(0, str(TOOLS_ROOT))
 
 from local_jobs import (DATA_ROOT, STATE_ROOT, list_runs, preview_collection, reconcile_interrupted_runs,
-                        request_active_run_stop,
-                        resume_run, start_batch_processing, start_collection, start_reprocessing)
+                        launch_worker_process, request_active_run_stop, validate_worker_count)
 
 
 PAGE = r"""<!doctype html>
@@ -41,47 +40,50 @@ button{border:0;border-radius:7px;padding:9px 13px;background:#2459a6;color:whit
 dialog{width:min(1000px,94vw);max-height:90vh;border:0;border-radius:12px;padding:20px;box-shadow:0 12px 50px #11182755}dialog::backdrop{background:#10182899}.detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.detail-grid pre{max-height:260px;margin:0}.detail-table{max-height:320px;overflow:auto}#runRows td{white-space:normal;max-width:340px;overflow-wrap:anywhere}.connection{float:right;color:#586579;font-size:.85rem}
 </style></head><body><main class="wrap">
 <header class="card"><span id="connectionState" class="connection">Conectando atualizações…</span><h1>Observatório das Urnas</h1><div class="muted">Jobs locais · dados em <code>dados/</code> · estado e retomada em <code>.estado-local/</code></div></header>
-<section class="card"><h2>Operação</h2><div class="modes"><label><input type="radio" name="mode" value="collect" checked> Coletar dados</label><label><input type="radio" name="mode" value="batch_process"> Consolidar por remessas</label><label><input type="radio" name="mode" value="reprocess"> Reprocessar dados locais</label></div>
+<section class="card"><h2>Operação</h2><div class="modes"><label><input type="radio" name="mode" value="collect" checked> Coletar dados</label><label><input type="radio" name="mode" value="batch_process"> Coletar e conciliar conjunto completo</label><label><input type="radio" name="mode" value="reprocess"> Reprocessar dados locais</label></div>
 <div id="collect"><h2 style="margin-top:18px">Abrangência da coleta</h2><div class="grid">
 <div class="field"><label for="turn">Turno</label><select id="turn"><option value="2">2</option><option value="1">1</option><option value="ambos">Ambos</option></select></div>
 <div class="field"><label for="uf">UF</label><input id="uf" placeholder="ex.: es"></div><div class="field"><label for="municipio">Município</label><input id="municipio" placeholder="código TSE"></div>
 <div class="field"><label for="zona">Zona</label><input id="zona" placeholder="ex.: 0054"></div><div class="field"><label for="secao">Seção</label><input id="secao" placeholder="ex.: 0509"></div>
 <div class="field"><label for="offset">Offset</label><input id="offset" type="number" min="0" value="0"></div><div class="field"><label for="limit">Máximo de seções</label><input id="limit" type="number" min="1" placeholder="sem limite"></div>
 </div><label class="check"><input id="refresh" type="checkbox"> Atualizar os dados brutos em vez de usar o modo incremental</label>
-<div class="muted">Filtros vazios ampliam a seleção. Confira a prévia antes de iniciar.</div><div class="grid" style="margin-top:12px"><div class="field"><label id="workersLabel" for="workers">Workers simultâneos</label><input id="workers" type="number" min="1" value="15"><small id="workersHint" class="muted">Padrão: 15 · sem teto fixo</small></div></div><div id="batchOptions" class="grid" style="display:none;margin-top:12px"><div class="field"><label for="batchSize">Seções por remessa</label><input id="batchSize" type="number" min="1" max="10000" value="500"></div></div><div id="batchCleanupNote" class="status" style="display:none">Ao iniciar, todo o conteúdo de <code>dados/</code> será removido. Ao final de cada remessa, os brutos serão limpos depois de salvar o CSV e preservar evidências de anomalias ou processamento incompleto.</div><div class="actions" style="margin-top:12px"><button id="preview">Pré-visualizar seleção</button><button id="start" disabled>Iniciar coleta</button></div><div id="previewResult" class="preview">Prévia ainda não calculada.</div></div>
+<div class="muted">Filtros vazios ampliam a seleção. Confira a prévia antes de iniciar.</div><div id="batchOptions" class="grid" style="display:none;margin-top:12px"><div class="field"><label for="batchSize">Tamanho interno do lote</label><input id="batchSize" type="number" min="1" max="10000" value="500"></div></div><div id="batchCleanupNote" class="status" style="display:none">Seções já consolidadas podem ser reutilizadas. A auditoria física verifica apenas sessões pendentes com dados existentes ou estado incerto; dados brutos são limpos por seção após consolidação segura.</div><div class="actions" style="margin-top:12px"><button id="preview">Pré-visualizar seleção</button><button id="start" disabled>Iniciar coleta</button></div><div id="previewResult" class="preview">Prévia ainda não calculada.</div></div>
+<div class="grid" style="margin-top:12px"><div class="field"><label id="workersLabel" for="workers">Processos worker</label><input id="workers" type="number" min="1" value="15"><small id="workersHint" class="muted">Padrão: 15 · processos Python independentes</small></div></div>
 <div class="actions" style="margin-top:16px"><button id="reprocess" class="secondary">Iniciar reprocessamento local</button><button id="stop" class="stop" disabled>Parar após a unidade atual</button></div>
 <div id="status" class="status">Pronto.</div><div class="progress-meta"><strong id="progressValue">—</strong><span id="progressDetail">Nenhuma execução em andamento.</span></div><div class="bar"><i id="bar"></i></div></section>
- <section class="card"><h2>Workers de coleta e extração</h2><div id="workerSummary" class="muted">Nenhum worker em andamento.</div><div id="activeJobs" class="job-list" style="margin-top:10px"></div><details style="margin-top:12px"><summary id="queueSummary">Fila de espera</summary><ol id="queuedJobs" class="queue-list"></ol></details></section>
+<section class="card"><h2>Processos worker</h2><div id="workerSummary" class="muted">Nenhum processo em andamento.</div><div id="activeJobs" class="job-list" style="margin-top:10px"></div><details style="margin-top:12px"><summary id="queueSummary">Fila de espera</summary><ol id="queuedJobs" class="queue-list"></ol></details></section>
 <section class="card"><div class="actions" style="justify-content:space-between"><h2>Execuções locais</h2><button id="refreshRuns" class="secondary">Atualizar lista</button></div><div class="table-wrap"><table><thead><tr><th>Tipo</th><th>Estado</th><th>Início UTC</th><th>ID da execução</th><th></th></tr></thead><tbody id="runs"></tbody></table></div></section>
 <section class="card"><h2>Atividade recente</h2><pre id="log">Aguardando atividade.</pre></section></main>
-<dialog id="runDetails"><div class="actions" style="justify-content:space-between"><h2>Detalhes da execução <span id="detailRunTitle"></span></h2><button id="closeDetails" class="secondary">Fechar</button></div><div class="actions" style="margin-bottom:12px"><button id="copyParams" class="secondary">Copiar parâmetros</button><button id="repeatRun">Nova execução com estes parâmetros</button></div><div class="detail-grid"><section><h3>Execução e parâmetros</h3><pre id="runMetadata"></pre></section><section><h3>Plano completo</h3><pre id="runPlan"></pre></section></div><h3>Contagens por etapa</h3><pre id="runCounts"></pre><h3>Seções da execução</h3><div id="sectionPageInfo" class="muted"></div><div class="detail-table"><table><thead><tr><th>Turno</th><th>Seção</th><th>Coleta bruta</th><th>Extração</th><th>Aquisição</th><th>Erro</th></tr></thead><tbody id="runRows"></tbody></table></div><div class="actions" style="margin-top:10px"><button id="prevSectionPage" class="secondary">Anterior</button><button id="nextSectionPage" class="secondary">Próxima</button></div><h3>Eventos recentes</h3><pre id="runEvents"></pre></dialog>
+<dialog id="runDetails"><div class="actions" style="justify-content:space-between"><h2>Detalhes da execução <span id="detailRunTitle"></span></h2><button id="closeDetails" class="secondary">Fechar</button></div><div class="actions" style="margin-bottom:12px"><button id="copyParams" class="secondary">Copiar parâmetros</button><button id="repeatRun">Nova execução com estes parâmetros</button></div><div class="detail-grid"><section><h3>Execução e parâmetros</h3><pre id="runMetadata"></pre></section><section><h3>Plano completo</h3><pre id="runPlan"></pre></section></div><h3>Contagens por etapa</h3><pre id="runCounts"></pre><h3>Seções da execução</h3><div id="sectionPageInfo" class="muted"></div><div class="detail-table"><table><thead><tr><th>Turno</th><th>Seção</th><th>Coleta bruta</th><th>Extração</th><th>Consolidação</th><th>Aquisição</th><th>Erro</th></tr></thead><tbody id="runRows"></tbody></table></div><div class="actions" style="margin-top:10px"><button id="prevSectionPage" class="secondary">Anterior</button><button id="nextSectionPage" class="secondary">Próxima</button></div><h3>Eventos recentes</h3><pre id="runEvents"></pre></dialog>
 <script>
-const $=id=>document.getElementById(id);let preview=null,cursor=0,busy=false,canStop=false,attachedRunSeen=null,source=null,jobState={worker_limit:15,active_jobs:[],waiting_count:0,waiting_jobs:[]},workerSlots={},runDetails=null,detailOffset=0,pendingRepeat=null;
+const $=id=>document.getElementById(id);let preview=null,cursor=0,busy=false,canStop=false,attachedRunSeen=null,source=null,jobState={worker_limit:15,active_jobs:[],waiting_count:0,waiting_jobs:[]},workerSlots={},runDetails=null,detailOffset=0,pendingRepeat=null,lastActivityAppend=0;
 const mode=()=>document.querySelector('input[name=mode]:checked').value;
 const number=n=>Number(n||0).toLocaleString('pt-BR');
-function progressDescription(s){const d=s.progress_detail;if(!d)return s.attached_run?(s.attached_run.cross_process_stop_supported?`Acompanhando ${s.attached_run.run_id}; parada segura disponível.`:`Acompanhando ${s.attached_run.run_id}; para parar, use a UI que iniciou o job.`):(s.busy?'Preparando execução…':'Nenhuma execução em andamento.');if(d.raw_total!=null)return `Coleta bruta ${number(d.raw_processed)} de ${number(d.raw_total)} · extrações concluídas ${number(d.extraction_processed)}.`;if(d.total!=null)return `${d.stage||'Etapa'}: ${number(d.processed)} de ${number(d.total)}.`;return d.message||d.stage||'Progresso em andamento.'}
+function progressDescription(s){const d=s.progress_detail;if(!d)return s.attached_run?(s.attached_run.cross_process_stop_supported?`Acompanhando ${s.attached_run.run_id}; parada segura disponível.`:`Acompanhando ${s.attached_run.run_id}; para parar, use a UI que iniciou o job.`):(s.busy?'Preparando execução…':'Nenhuma execução em andamento.');if(d.heartbeat_age_seconds>30)return `${d.stage||'Sem atualização observável'} · último sinal há ${number(d.heartbeat_age_seconds)} s.`;if(d.checkpoint_id)return `${d.stage}: ${number(d.phase_processed)} de ${number(d.phase_total)} seções reassociadas.`;if(d.phase_total!=null)return `${d.stage}: ${number(d.phase_processed)} de ${number(d.phase_total)}${d.unique_sections!=null?` · ${number(d.unique_sections)} seções únicas`:''}${d.turn?` · turno ${d.turn}`:''}.`;if(d.section)return `${d.stage||'Etapa'} · seção ${d.section}${d.turn?` · turno ${d.turn}`:''}.`;if(d.raw_total!=null)return `Coleta bruta ${number(d.raw_processed)} de ${number(d.raw_total)} · extrações concluídas ${number(d.extraction_processed)}.`;if(d.total!=null)return `${d.stage||'Etapa'}: ${number(d.processed)} de ${number(d.total)}.`;return d.message||d.stage||'Progresso em andamento.'}
+function progressDescriptionWithPhases(s){const d=s.progress_detail;if(!d||!d.audit_active||d.heartbeat_age_seconds>30)return progressDescription(s);return `Auditoria física do job: ${number(d.audit_completed)} de ${number(d.audit_total)} seções · Ativos: ${number(d.active_stage_counts?.audit||0)} workers · Na fila: ${number(d.waiting_stage_counts?.audit||0)}`}
 function requestBody(){return {turn:$('turn').value,uf:$('uf').value.trim(),municipio:$('municipio').value.trim(),zona:$('zona').value.trim(),secao:$('secao').value.trim(),offset:Number($('offset').value||0),limit:$('limit').value?Number($('limit').value):null,workers:Number($('workers').value||15)}}
 async function post(path,data={}){const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});const x=await r.json();if(!r.ok)throw Error(x.error||r.statusText);return x}
-function updateControls(){const selectedMode=mode(),collecting=selectedMode==='collect'||selectedMode==='batch_process',batch=selectedMode==='batch_process';$('collect').style.display=collecting?'block':'none';$('batchOptions').style.display=batch?'grid':'none';$('batchCleanupNote').style.display=batch?'block':'none';$('refresh').closest('.check').style.display=batch?'none':'flex';$('workersLabel').textContent=batch?'Workers simultâneos (fila completa)':'Workers de seção (coleta + extração)';$('workersHint').textContent=batch?'Padrão: 15 · sem teto fixo. Cada worker coleta e analisa; workers podem estar em etapas diferentes.':'Padrão: 15 · sem teto fixo';$('preview').disabled=busy||!collecting;$('start').disabled=busy||!collecting||!preview;$('start').textContent=batch?'Iniciar processamento por remessas':'Iniciar coleta';$('reprocess').disabled=busy||collecting;$('stop').disabled=!canStop;$('stop').style.display=canStop?'inline-block':'none';$('stop').textContent=attachedRunSeen?'Solicitar parada segura':'Parar após a unidade atual'}
-function append(message){const el=$('log');if(el.textContent==='Aguardando atividade.')el.textContent='';el.textContent+=message+'\n';el.scrollTop=el.scrollHeight}
-function eventMessage(e){if(e.type==='status'||e.type==='catalog_progress')return e.message;if(e.type==='batch_started')return `Remessa ${e.batch_id}: ${number(e.section_count)} seções`;if(e.type==='batch_finished')return `Remessa ${e.batch_id} consolidada por estado: ${(e.csv_paths||[]).map(x=>`${x.uf} (${number(x.row_count)} linhas)`).join(', ')}`;if(e.type==='section_started')return `Iniciando turno ${e.turn}: ${e.section}`;if(e.type==='section_complete'||e.type==='reprocessing_complete'||e.type==='extraction_complete')return `${e.stage==='batch_pipeline'?'Coleta/processamento':e.stage||'extração'}: ${e.section||''} — ${e.status}`;if(e.type==='run_started')return `Job ${e.run_id} iniciado (${e.kind})`;if(e.type==='run_finished')return e.status==='paused'?`Execução ${e.run_id} pausada. O progresso foi salvo para retomada.`:e.status==='complete'?`Execução ${e.run_id} concluída.`:`Execução ${e.run_id} terminou: ${e.status}.`;if(e.type==='run_failed'||e.type==='worker_error'||e.type==='preview_failed')return e.error;if(e.type==='preview_complete')return 'Inventário oficial consultado.';return null}
-function setGlobalProgress(progress,detail){const pct=progress===null||progress===undefined?null:Number(progress);$('bar').style.width=pct===null?'0%':`${pct}%`;$('progressValue').textContent=pct===null?'—':`${new Intl.NumberFormat('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}).format(pct)}%`;$('progressDetail').textContent=progressDescription({progress_detail:detail,busy,attached_run:attachedRunSeen?{run_id:attachedRunSeen}:null})}
-function renderJobs(j){jobState=j||jobState;const active=jobState.active_jobs||[],waiting=jobState.waiting_jobs||[],count=jobState.waiting_count||0,limit=jobState.worker_limit||15,slots=Array.from({length:limit},()=>null),activeIds=new Set(active.map(x=>x.job_id));for(const id of Object.keys(workerSlots))if(!activeIds.has(id))delete workerSlots[id];for(const x of active){let index=workerSlots[x.job_id];if(index===undefined||index>=limit||slots[index]){index=slots.findIndex(slot=>slot===null);if(index<0)continue;workerSlots[x.job_id]=index}slots[index]=x}$('workerSummary').textContent=active.length?`${active.length}/${limit} ativos · ${number(count)} aguardando`:`${limit} posições de worker · todos parados${count?` · ${number(count)} aguardando`:''}`;$('activeJobs').replaceChildren(...slots.map((x,index)=>{const box=document.createElement('div');box.className=`job${x?'':' idle'}`;const head=document.createElement('div');head.className='job-head';const label=document.createElement('strong');label.textContent=x?`${x.section||x.job_id}${x.turn?` · turno ${x.turn}`:''}`:`Worker ${String(index+1).padStart(2,'0')}`;label.title=label.textContent;const pct=document.createElement('span');pct.textContent=x?`${new Intl.NumberFormat('pt-BR',{maximumFractionDigits:0}).format(Number(x.progress||0))}%`:'—';head.append(label,pct);const detail=document.createElement('div');detail.className='muted';detail.textContent=x?(x.file?`${x.stage||'Processando'} · ${x.file}`:(x.stage||'Processando')):'Parado';detail.title=detail.textContent;const bar=document.createElement('div');bar.className='bar';const fill=document.createElement('i');fill.style.width=x?`${Math.min(100,Math.max(0,Number(x.progress||0)))}%`:'0%';bar.append(fill);box.append(head,detail,bar);return box}));$('queueSummary').textContent=`Fila de espera: ${number(count)} seção(ões)${count>waiting.length?` · exibindo próximas ${waiting.length}`:''}`;$('queuedJobs').replaceChildren(...waiting.map(x=>{const li=document.createElement('li');li.textContent=`${x.section||x.job_id}${x.turn?` · turno ${x.turn}`:''}`;return li}))}
+function updateControls(){const selectedMode=mode(),collecting=selectedMode==='collect'||selectedMode==='batch_process',batch=selectedMode==='batch_process';$('collect').style.display=collecting?'block':'none';$('batchOptions').style.display='none';$('batchCleanupNote').style.display=batch?'block':'none';$('refresh').closest('.check').style.display=batch?'none':'flex';$('workersLabel').textContent='Processos worker';$('workersHint').textContent='Padrão: 15 · processos Python independentes, reutilizados em todas as etapas.';$('preview').disabled=busy||!collecting;$('start').disabled=busy||!collecting||!preview;$('start').textContent=batch?'Iniciar processamento completo':'Iniciar coleta';$('reprocess').disabled=busy||collecting;$('stop').disabled=!canStop;$('stop').style.display=canStop?'inline-block':'none';$('stop').textContent=attachedRunSeen?'Solicitar parada segura':'Parar após a unidade atual'}
+function append(message){const el=$('log');if(el.textContent==='Aguardando atividade.')el.textContent='';const lines=(el.textContent+message+'\n').split('\n');el.textContent=lines.slice(-201).join('\n');el.scrollTop=el.scrollHeight}
+function eventMessage(e){if(e.type==='status'||e.type==='catalog_progress')return e.message;if(e.type==='audit_started')return `Auditoria física iniciada para ${number(e.sections_total)} seções com ${number(e.workers)} workers.`;if(e.type==='audit_progress'){const s=e.summary||{};return `Auditoria física: ${number(e.processed)} de ${number(e.total)} seções · manter ${number(s.actions?.keep)} · coletar ${number(s.actions?.collect)} · reconciliar ${number(s.actions?.consolidate)} · falhas ${number(s.sections_failed)}`}if(e.type==='audit_complete'){const s=e.summary||{},label=s.sections_completed===s.sections_total?'concluída':s.status==='paused'?'pausada':'parcial';return `Auditoria física ${label}: ${number(s.sections_completed)} de ${number(s.sections_total)} seções · manter ${number(s.actions?.keep)} · coletar ${number(s.actions?.collect)} · reconciliar ${number(s.actions?.consolidate)} · falhas ${number(s.sections_failed)}.`}if(e.type==='resume_audit'){const actions=(e.turns||[]).map(x=>`turno ${x.turn}: ${x.action}`).join(', ');return `Auditoria ${e.section||''}${actions?` — ${actions}`:''}${e.error?` — falha: ${e.error}`:''}`}if(e.type==='stage_complete')return `Seção ${e.section||''} · ${e.stage||'etapa'} — ${e.status}`;if(e.type==='batch_started')return `Remessa ${e.batch_id}: ${number(e.section_count)} seções`;if(e.type==='batch_finished')return `Remessa ${e.batch_id} consolidada por estado: ${(e.csv_paths||[]).map(x=>`${x.uf} (${number(x.row_count)} linhas)`).join(', ')}`;if(e.type==='section_started')return `Iniciando turno ${e.turn}: ${e.section}`;if(e.type==='section_complete'||e.type==='reprocessing_complete'||e.type==='extraction_complete')return `${e.stage==='batch_pipeline'?'Coleta/processamento':e.stage||'extração'}: ${e.section||''} — ${e.status}`;if(e.type==='run_started')return `Job ${e.run_id} iniciado (${e.kind})`;if(e.type==='run_finished')return e.status==='paused'?`Execução ${e.run_id} pausada. O progresso foi salvo para retomada.`:e.status==='complete'?`Execução ${e.run_id} concluída.`:`Execução ${e.run_id} terminou: ${e.status}.`;if(e.type==='run_failed'||e.type==='worker_error'||e.type==='preview_failed')return e.error;if(e.type==='preview_complete')return 'Inventário oficial consultado.';return null}
+const baseEventMessage=eventMessage;eventMessage=function(e){if(e.type==='job_started'||e.type==='job_finished'){const phase=e.stage||e.stage_kind||'Etapa',section=e.section||e.job_id||'',turns=e.turns?.length?` · turnos ${e.turns.join(', ')}`:e.turn?` · turno ${e.turn}`:'';if(e.type==='job_started')return `Início · ${phase} · seção ${section}${turns}`;return `Fim · ${phase} · seção ${section}${turns} — ${e.status||'concluída'}${e.error?` · ${e.error}`:''}`}return baseEventMessage(e)};
+function setGlobalProgress(progress,detail){const pct=progress===null||progress===undefined?null:Number(progress);$('bar').style.width=pct===null?'0%':`${pct}%`;$('progressValue').textContent=pct===null?'—':`${new Intl.NumberFormat('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}).format(pct)}%`;$('progressDetail').textContent=progressDescriptionWithPhases({progress_detail:detail,busy,attached_run:attachedRunSeen?{run_id:attachedRunSeen}:null})}
+function renderJobs(j){jobState=j||jobState;const active=jobState.active_jobs||[],waiting=jobState.waiting_jobs||[],count=jobState.waiting_count||0,limit=jobState.worker_limit||15,slots=Array.from({length:limit},()=>null),activeIds=new Set(active.map(x=>x.job_id));for(const id of Object.keys(workerSlots))if(!activeIds.has(id))delete workerSlots[id];for(const x of active){let index=workerSlots[x.job_id];if(index===undefined||index>=limit||slots[index]){index=slots.findIndex(slot=>slot===null);if(index<0)continue;workerSlots[x.job_id]=index}slots[index]=x}$('workerSummary').textContent=active.length?`${active.length}/${limit} processos ativos · ${number(count)} aguardando`:`${limit} processos configurados · todos parados${count?` · ${number(count)} aguardando`:''}`;$('activeJobs').replaceChildren(...slots.map((x,index)=>{const box=document.createElement('div');box.className=`job${x?'':' idle'}`;const head=document.createElement('div');head.className='job-head';const label=document.createElement('strong');label.textContent=x?`${x.section||x.job_id}${x.turn?` · turno ${x.turn}`:''}`:`Worker ${String(index+1).padStart(2,'0')}`;label.title=label.textContent;const pct=document.createElement('span');pct.textContent=x?`${new Intl.NumberFormat('pt-BR',{maximumFractionDigits:0}).format(Number(x.progress||0))}%`:'—';head.append(label,pct);const detail=document.createElement('div');detail.className='muted';const workerPid=x?.process_id?`PID ${x.process_id} · `:'';detail.textContent=x?`${workerPid}${x.file?`${x.stage||'Processando'} · ${x.file}`:(x.stage||'Processando')}`:'Parado';detail.title=detail.textContent;const bar=document.createElement('div');bar.className='bar';const fill=document.createElement('i');fill.style.width=x?`${Math.min(100,Math.max(0,Number(x.progress||0)))}%`:'0%';bar.append(fill);box.append(head,detail,bar);return box}));$('queueSummary').textContent=`Fila de espera: ${number(count)} seção(ões)${count>waiting.length?` · exibindo próximas ${waiting.length}`:''}`;$('queuedJobs').replaceChildren(...waiting.map(x=>{const li=document.createElement('li');li.textContent=`${x.section||x.job_id}${x.turn?` · turno ${x.turn}`:''}`;return li}))}
 function applySnapshot(s,showRecent=false){busy=!!s.busy;canStop=!!s.can_stop;cursor=Math.max(cursor,Number(s.cursor||0));attachedRunSeen=s.attached_run?.run_id||null;jobState=s.jobs||jobState;setGlobalProgress(s.progress,s.progress_detail);renderJobs(jobState);renderRuns(s.runs||[]);updateControls();if(showRecent){$('log').textContent='';for(const e of s.recent_events||[]){const m=eventMessage(e);if(m)append(m)}}}
 function handleUpdate(e){cursor=Math.max(cursor,Number(e.cursor||0));if(e.ui_progress!==undefined)setGlobalProgress(e.ui_progress,e.ui_progress_detail);if(e.type==='catalog_progress')setGlobalProgress(e.progress,{stage:`Catálogos ${e.config_id}`,processed:e.completed,total:e.total});const m=eventMessage(e);if(m){$('status').textContent=m;append(m)}if(e.type==='job_queue'){jobState={worker_limit:e.worker_limit,active_jobs:e.active_jobs||[],waiting_count:e.waiting_count||0,waiting_jobs:e.waiting_jobs||[]};renderJobs(jobState)}else if(e.type==='job_started'){jobState.active_jobs=[...(jobState.active_jobs||[]).filter(x=>x.job_id!==e.job_id),e];renderJobs(jobState)}else if(e.type==='job_progress'){jobState.active_jobs=(jobState.active_jobs||[]).map(x=>x.job_id===e.job_id?{...x,...e}:x);renderJobs(jobState)}else if(e.type==='job_finished'){jobState.active_jobs=(jobState.active_jobs||[]).filter(x=>x.job_id!==e.job_id);renderJobs(jobState)}if(e.type==='preview_ready'){preview=e.result;$('previewResult').textContent=e.result.turns.map(x=>`Turno ${x.turn}: ${x.selected_sections} selecionadas, ${x.collectable_sections} coletáveis, ${x.aggregated_sections} agregadas`).join(' · ')+` · Total: ${e.result.total_selected_sections}`;updateControls()}if(e.type==='preview_failed'){$('previewResult').textContent=e.error;preview=null;pendingRepeat=null;updateControls()}if(e.type==='run_started'){busy=true;canStop=true;updateControls();refreshSnapshot()}if(e.type==='worker_done'){busy=false;canStop=false;jobState={...jobState,active_jobs:[],waiting_count:0,waiting_jobs:[]};renderJobs(jobState);updateControls();refreshSnapshot();if(pendingRepeat&&preview)setTimeout(beginRepeatedCollection,0)}}
 function connectEvents(){source=new EventSource('/api/events');source.addEventListener('snapshot',e=>{try{const s=JSON.parse(e.data);applySnapshot(s,true);for(const item of s.recent_events||[])cursor=Math.max(cursor,Number(item.cursor||0))}catch(error){showError(error)}});source.addEventListener('state',e=>{try{applySnapshot(JSON.parse(e.data),false)}catch(error){showError(error)}});source.onmessage=e=>{try{handleUpdate(JSON.parse(e.data))}catch(error){showError(error)}};source.onopen=()=>{$('connectionState').textContent='Atualizações em tempo real conectadas'};source.onerror=()=>{$('connectionState').textContent='Reconectando atualizações…'}}
 async function refreshSnapshot(){try{const r=await fetch('/api/state');const s=await r.json();if(!r.ok)throw Error(s.error||r.statusText);applySnapshot(s,false)}catch(e){showError(e)}}
 function renderRuns(runs){$('runs').replaceChildren(...runs.map(run=>{const tr=document.createElement('tr');for(const value of [run.kind,run.status,run.created_at_utc,run.run_id]){const td=document.createElement('td');td.textContent=value||'';tr.append(td)}const td=document.createElement('td');const details=document.createElement('button');details.className='secondary';details.textContent='Detalhes';details.onclick=()=>loadRunDetails(run.run_id);td.append(details);if(['paused','partial','failed'].includes(run.status)){const b=document.createElement('button');b.className='secondary';b.textContent='Retomar';b.style.marginLeft='6px';b.onclick=async()=>{busy=true;canStop=true;updateControls();try{await post('/api/resume',{run_id:run.run_id});await refreshSnapshot()}catch(e){busy=false;canStop=false;updateControls();showError(e)}};td.append(b)}tr.append(td);return tr}))}
-async function loadRunDetails(runId,offset=0){try{const r=await fetch(`/api/runs/${encodeURIComponent(runId)}?offset=${offset}&limit=50`);const d=await r.json();if(!r.ok)throw Error(d.error||r.statusText);runDetails=d;detailOffset=offset;$('detailRunTitle').textContent=runId;$('runMetadata').textContent=JSON.stringify(d.run,null,2);$('runPlan').textContent=JSON.stringify(d.plan,null,2);$('runCounts').textContent=JSON.stringify({section_states:d.state_counts,batches:d.batch_states||[]},null,2);$('runEvents').textContent=JSON.stringify(d.recent_events,null,2);$('sectionPageInfo').textContent=`Exibindo ${d.section_jobs.items.length?number(offset+1):'0'}–${number(offset+d.section_jobs.items.length)} de ${number(d.section_jobs.total)} registros`;const rows=$('runRows');rows.replaceChildren(...d.section_jobs.items.map(item=>{const tr=document.createElement('tr');for(const value of [item.turn,item.section_key,item.raw_status,item.extract_status,item.acquisition_path||'',item.error||'']){const td=document.createElement('td');td.textContent=value??'';tr.append(td)}return tr}));$('prevSectionPage').disabled=offset===0;$('nextSectionPage').disabled=offset+d.section_jobs.items.length>=d.section_jobs.total;if(!$('runDetails').open)$('runDetails').showModal()}catch(e){showError(e)}}
+async function loadRunDetails(runId,offset=0){try{const r=await fetch(`/api/runs/${encodeURIComponent(runId)}?offset=${offset}&limit=50`);const d=await r.json();if(!r.ok)throw Error(d.error||r.statusText);runDetails=d;detailOffset=offset;const runView={...d.run},planView=d.plan?{...d.plan}:null;if(runView.kind==='batch_process'){for(const key of ['total_batches','completed_batches','current_batch','next_checkpoint_index'])delete runView[key];if(planView){delete planView.checkpoints;delete planView.sections_per_checkpoint;delete planView.total_batches}}$('detailRunTitle').textContent=runId;$('runMetadata').textContent=JSON.stringify(runView,null,2);$('runPlan').textContent=JSON.stringify(planView,null,2);$('runCounts').textContent=JSON.stringify({section_states:d.state_counts,...(d.run.kind==='batch_process'?{}:{batches:d.batch_states||[]})},null,2);$('runEvents').textContent=JSON.stringify(d.recent_events,null,2);$('sectionPageInfo').textContent=`Exibindo ${d.section_jobs.items.length?number(offset+1):'0'}–${number(offset+d.section_jobs.items.length)} de ${number(d.section_jobs.total)} registros`;const rows=$('runRows');rows.replaceChildren(...d.section_jobs.items.map(item=>{const tr=document.createElement('tr');for(const value of [item.turn,item.section_key,item.raw_status,item.extract_status,item.consolidation_status||'',item.acquisition_path||'',item.error||'']){const td=document.createElement('td');td.textContent=value??'';tr.append(td)}return tr}));$('prevSectionPage').disabled=offset===0;$('nextSectionPage').disabled=offset+d.section_jobs.items.length>=d.section_jobs.total;if(!$('runDetails').open)$('runDetails').showModal()}catch(e){showError(e)}}
 async function copyRunParameters(){if(!runDetails)return;const payload={kind:runDetails.run.kind,data_root:runDetails.run.data_root,request:runDetails.run.request};try{await navigator.clipboard.writeText(JSON.stringify(payload,null,2));$('status').textContent='Parâmetros copiados.'}catch(e){showError(new Error('Não foi possível copiar; confira se a página está em localhost e permita acesso à área de transferência.'))}}
-async function repeatSelectedRun(){if(!runDetails)return;const run=runDetails.run;if(run.kind==='collect'||run.kind==='batch_process'){const req=run.request||{},batch=run.kind==='batch_process';document.querySelector(`input[name=mode][value=${batch?'batch_process':'collect'}]`).checked=true;$('turn').value=(req.turns||[]).length>1?'ambos':(req.turns||['2'])[0];for(const key of ['uf','municipio','zona','secao'])$(key).value=req[key]||'';$('offset').value=String(req.offset||0);$('limit').value=req.limit==null?'':String(req.limit);$('refresh').checked=req.incremental===false;$('workers').value=String(req.workers||15);if(batch)$('batchSize').value=String(req.sections_per_batch||500);preview=null;pendingRepeat={incremental:req.incremental!==false,run_id:run.run_id,batch,sections_per_batch:req.sections_per_batch,workers:req.workers};$('runDetails').close();updateControls();try{await post('/api/preview',requestBody());busy=true;updateControls()}catch(e){pendingRepeat=null;showError(e)}}else if(run.kind==='reprocess'){if(!confirm(`Iniciar novo reprocessamento com os mesmos dados de ${run.data_root||'dados locais'}?`))return;try{await post('/api/reprocess',{data_root:run.data_root});$('runDetails').close();busy=true;updateControls()}catch(e){showError(e)}}else{showError(new Error('Este tipo de execução não pode ser repetido pela UI.'))}}
-async function beginRepeatedCollection(){const pending=pendingRepeat;pendingRepeat=null;if(!pending||!preview)return;if(pending.batch){if(!confirm(`Iniciar novo processamento por remessas com os parâmetros de ${pending.run_id}? A prévia selecionou ${preview.total_selected_sections} seções. Todo o conteúdo de dados/ será removido antes de começar.`))return;try{await post('/api/batch-process',{...requestBody(),preview_dir:preview.preview_dir,sections_per_batch:Number($('batchSize').value||pending.sections_per_batch||500),confirm_clean_data:true});busy=true;updateControls()}catch(e){showError(e)}return}if(!confirm(`Criar uma nova coleta com os mesmos parâmetros do job ${pending.run_id}? A prévia atual selecionou ${preview.total_selected_sections} seções. Nenhum arquivo de dados/ será removido.`))return;try{await post('/api/collect',{...requestBody(),preview_dir:preview.preview_dir,incremental:pending.incremental});busy=true;updateControls()}catch(e){showError(e)}}
+async function repeatSelectedRun(){if(!runDetails)return;const run=runDetails.run;if(run.kind==='collect'||run.kind==='batch_process'){const req=run.request||{},batch=run.kind==='batch_process';document.querySelector(`input[name=mode][value=${batch?'batch_process':'collect'}]`).checked=true;$('turn').value=(req.turns||[]).length>1?'ambos':(req.turns||['2'])[0];for(const key of ['uf','municipio','zona','secao'])$(key).value=req[key]||'';$('offset').value=String(req.offset||0);$('limit').value=req.limit==null?'':String(req.limit);$('refresh').checked=req.incremental===false;$('workers').value=String(req.workers||15);if(batch)$('batchSize').value=String(req.sections_per_batch||500);preview=null;pendingRepeat={incremental:req.incremental!==false,run_id:run.run_id,batch,sections_per_batch:req.sections_per_batch,workers:req.workers};$('runDetails').close();updateControls();try{await post('/api/preview',requestBody());busy=true;updateControls()}catch(e){pendingRepeat=null;showError(e)}}else if(run.kind==='reprocess'){const req=run.request||{};if(!confirm(`Iniciar novo reprocessamento com os mesmos dados de ${run.data_root||'dados locais'}?`))return;try{await post('/api/reprocess',{data_root:run.data_root,workers:req.workers||15});$('runDetails').close();busy=true;updateControls()}catch(e){showError(e)}}else{showError(new Error('Este tipo de execução não pode ser repetido pela UI.'))}}
+async function beginRepeatedCollection(){const pending=pendingRepeat;pendingRepeat=null;if(!pending||!preview)return;if(pending.batch){if(!confirm(`Iniciar novo processamento por remessas com os parâmetros de ${pending.run_id}? A prévia selecionou ${preview.total_selected_sections} seções. Resultados consolidados compatíveis serão reutilizados; dados brutos serão limpos apenas por seção após consolidação segura.`))return;try{await post('/api/batch-process',{...requestBody(),preview_dir:preview.preview_dir,sections_per_batch:Number($('batchSize').value||pending.sections_per_batch||500),confirm_processing:true});busy=true;updateControls()}catch(e){showError(e)}return}if(!confirm(`Criar uma nova coleta com os mesmos parâmetros do job ${pending.run_id}? A prévia atual selecionou ${preview.total_selected_sections} seções. Nenhum arquivo de dados/ será removido.`))return;try{await post('/api/collect',{...requestBody(),preview_dir:preview.preview_dir,incremental:pending.incremental});busy=true;updateControls()}catch(e){showError(e)}}
 function showError(e){$('status').textContent=e.message;append(`ERRO: ${e.message}`)}
 document.querySelectorAll('input[name=mode]').forEach(x=>x.onchange=()=>{preview=null;updateControls()});
 ['turn','uf','municipio','zona','secao','offset','limit'].forEach(id=>$(id).oninput=()=>{preview=null;$('previewResult').textContent='A seleção mudou. Gere uma nova prévia.';updateControls()});
 $('preview').onclick=async()=>{try{preview=null;updateControls();await post('/api/preview',requestBody());busy=true;updateControls()}catch(e){showError(e)}};
-$('start').onclick=async()=>{if(!preview)return;if(mode()==='batch_process'){if(!confirm(`Processar ${preview.total_selected_sections} seções/turnos em remessas de ${$('batchSize').value} posições? Todo o conteúdo de dados/ será removido agora e os brutos serão limpos após a consolidação de cada remessa.`))return;try{await post('/api/batch-process',{...requestBody(),preview_dir:preview.preview_dir,sections_per_batch:Number($('batchSize').value),confirm_clean_data:true});busy=true;updateControls()}catch(e){showError(e)}return}if(!confirm(`Coletar ${preview.total_selected_sections} seções em modo ${$('refresh').checked?'atualização bruta':'incremental'}? Nenhum arquivo de dados/ será removido.`))return;try{await post('/api/collect',{...requestBody(),preview_dir:preview.preview_dir,incremental:!$('refresh').checked});busy=true;updateControls()}catch(e){showError(e)}};
-$('reprocess').onclick=async()=>{if(!confirm('Reprocessar as aquisições locais sem baixar arquivos brutos?'))return;try{await post('/api/reprocess');busy=true;updateControls()}catch(e){showError(e)}};
+ $('start').onclick=async()=>{if(!preview)return;if(mode()==='batch_process'){if(!confirm(`Processar ${preview.total_selected_sections} seções/turnos por remessas? Seções já consolidadas podem ser reutilizadas. A auditoria física será limitada a sessões pendentes com dados existentes ou estado incerto; os dados brutos serão limpos por seção após consolidação segura.`))return;try{await post('/api/batch-process',{...requestBody(),preview_dir:preview.preview_dir,sections_per_batch:Number($('batchSize').value),confirm_processing:true});busy=true;updateControls()}catch(e){showError(e)}return}if(!confirm(`Coletar ${preview.total_selected_sections} seções em modo ${$('refresh').checked?'atualização bruta':'incremental'}? Nenhum arquivo de dados/ será removido.`))return;try{await post('/api/collect',{...requestBody(),preview_dir:preview.preview_dir,incremental:!$('refresh').checked});busy=true;updateControls()}catch(e){showError(e)}};
+$('reprocess').onclick=async()=>{if(!confirm('Reprocessar as aquisições locais sem baixar arquivos brutos?'))return;try{await post('/api/reprocess',{workers:Number($('workers').value||15)});busy=true;updateControls()}catch(e){showError(e)}};
 $('stop').onclick=()=>post('/api/stop').then(x=>{$('status').textContent=`Parada segura solicitada para ${x.run_id}; as unidades ativas vão terminar primeiro.`}).catch(showError);$('refreshRuns').onclick=refreshSnapshot;$('closeDetails').onclick=()=>$('runDetails').close();$('copyParams').onclick=copyRunParameters;$('repeatRun').onclick=repeatSelectedRun;$('prevSectionPage').onclick=()=>loadRunDetails(runDetails.run.run_id,Math.max(0,detailOffset-50));$('nextSectionPage').onclick=()=>loadRunDetails(runDetails.run.run_id,detailOffset+50);connectEvents();updateControls();
 </script></body></html>"""
 
@@ -107,6 +109,71 @@ class JobServer(ThreadingHTTPServer):
         self.waiting_jobs = []
         self.waiting_count = 0
         self.worker_limit = 15
+        self.watched_run_id = None
+        self.watched_event_offset = 0
+        self.watched_worker_state_stamp = None
+        worker_errors_path = STATE_ROOT / "worker-errors.jsonl"
+        self.worker_error_offset = worker_errors_path.stat().st_size if worker_errors_path.exists() else 0
+        self.watcher = threading.Thread(target=self._watch_worker_process, name="observatorio-worker-watch", daemon=True)
+        self.watcher.start()
+
+    def _watch_worker_process(self) -> None:
+        last_status = None
+        while True:
+            try:
+                worker_errors_path = STATE_ROOT / "worker-errors.jsonl"
+                if worker_errors_path.is_file():
+                    with worker_errors_path.open("rb") as source:
+                        source.seek(self.worker_error_offset)
+                        error_data = source.read()
+                        self.worker_error_offset = source.tell()
+                    for line in error_data.splitlines():
+                        try:
+                            self.emit(json.loads(line.decode("utf-8")))
+                        except (UnicodeDecodeError, json.JSONDecodeError):
+                            continue
+                runs = list_runs()
+                active = next((run for run in runs if run.get("status") in {"preparing", "running"}), None)
+                if active:
+                    run_id = str(active.get("run_id"))
+                    event_path = STATE_ROOT / "runs" / run_id / "events.jsonl"
+                    if run_id != self.watched_run_id:
+                        self.watched_run_id = run_id
+                        self.watched_event_offset = event_path.stat().st_size if event_path.exists() else 0
+                        self.attached_run_id = run_id
+                        for saved_event in _tail_jsonl(event_path, limit=50):
+                            self.emit(saved_event)
+                    if event_path.is_file():
+                        with event_path.open("rb") as source:
+                            source.seek(self.watched_event_offset)
+                            new_data = source.read()
+                            self.watched_event_offset = source.tell()
+                        for line in new_data.splitlines():
+                            try:
+                                self.emit(json.loads(line.decode("utf-8")))
+                            except (UnicodeDecodeError, json.JSONDecodeError):
+                                continue
+                    worker_state_path = event_path.with_name("worker-state.json")
+                    if worker_state_path.is_file():
+                        stat = worker_state_path.stat()
+                        stamp = (stat.st_mtime_ns, stat.st_size)
+                        if stamp != self.watched_worker_state_stamp:
+                            try:
+                                worker_state = json.loads(worker_state_path.read_text(encoding="utf-8"))
+                                self.emit({"type": "job_queue", "run_id": run_id, **worker_state})
+                                self.watched_worker_state_stamp = stamp
+                            except (OSError, json.JSONDecodeError):
+                                pass
+                    last_status = "running"
+                elif last_status == "running":
+                    self.emit({"type": "worker_done"})
+                    last_status = None
+                    self.watched_run_id = None
+                    self.watched_event_offset = 0
+                    self.watched_worker_state_stamp = None
+            except (OSError, ValueError, json.JSONDecodeError):
+                pass
+            time.sleep(0.4)
 
     def emit(self, event: dict) -> None:
         with self.events_condition:
@@ -124,7 +191,8 @@ class JobServer(ThreadingHTTPServer):
             elif event.get("type") == "job_started" and event.get("job_id"):
                 self.active_jobs[event["job_id"]] = dict(event)
             elif event.get("type") == "job_progress" and event.get("job_id"):
-                self.active_jobs[event["job_id"]] = {**self.active_jobs.get(event["job_id"], {}), **event}
+                if event["job_id"] in self.active_jobs:
+                    self.active_jobs[event["job_id"]] = {**self.active_jobs[event["job_id"]], **event}
             elif event.get("type") == "job_finished":
                 self.active_jobs.pop(event.get("job_id"), None)
             elif event.get("type") == "worker_done":
@@ -135,27 +203,67 @@ class JobServer(ThreadingHTTPServer):
                 self.current_run_id = event.get("run_id")
                 self.progress = 0.0
                 self.progress_detail = {"stage": "Preparando execução"}
-            is_worker_event = event.get("type") in {"job_queue", "job_started", "job_progress", "job_finished"}
+            is_worker_event = event.get("type") in {"job_queue", "job_started", "job_progress", "job_finished", "worker_done"}
             processed = None if is_worker_event else event.get("progress_processed", event.get("processed"))
             total = None if is_worker_event else event.get("progress_total", event.get("total"))
             if processed is not None and total:
-                self.progress = min(100.0, round(processed * 100 / total, 2))
+                event_progress = event.get("progress")
+                self.progress = min(100.0, round(float(event_progress), 2)) if event_progress is not None else min(100.0, round(processed * 100 / total, 2))
+                previous_detail = dict(self.progress_detail or {})
                 self.progress_detail = {
                     "stage": event.get("stage", "execução"),
                     "processed": processed,
                     "total": total,
+                    "phase_processed": event.get("phase_processed", processed),
+                    "phase_total": event.get("phase_total", total),
+                    "unique_sections": event.get("unique_sections"),
+                    "sections_total": event.get("sections_total"),
+                    "checkpoint_id": event.get("checkpoint_id"),
+                    "checkpoint_processed": event.get("checkpoint_processed"),
+                    "checkpoint_total": event.get("checkpoint_total"),
                     "raw_processed": event.get("raw_processed"),
                     "raw_total": event.get("raw_total"),
                     "extraction_processed": event.get("extraction_processed"),
                     "extraction_total": event.get("extraction_total"),
                     "section": event.get("section"),
                     "turn": event.get("turn"),
+                    "audit_active": bool(event.get("audit_active")) if "audit_active" in event else previous_detail.get("audit_active", False),
+                    "audit_completed": event.get("processed") if event.get("audit_active") else previous_detail.get("audit_completed"),
+                    "audit_total": event.get("total") if event.get("audit_active") else previous_detail.get("audit_total"),
                 }
+                for name in ("active_stage_counts", "waiting_stage_counts"):
+                    if name in previous_detail:
+                        self.progress_detail[name] = previous_detail[name]
+                if not event.get("audit_active"):
+                    for name in ("audit_completed", "audit_total"):
+                        if name in previous_detail:
+                            self.progress_detail[name] = previous_detail[name]
+            if is_worker_event:
+                detail = dict(self.progress_detail or {})
+                active_stage_counts = {}
+                for item in self.active_jobs.values():
+                    stage = item.get("stage_kind") or "unknown"
+                    active_stage_counts[stage] = active_stage_counts.get(stage, 0) + 1
+                detail["active_stage_counts"] = active_stage_counts
+                if event.get("type") == "job_queue":
+                    detail["waiting_stage_counts"] = event.get("waiting_stage_counts") or {}
+                    if "audit_completed" in event:
+                        detail["audit_completed"] = int(event.get("audit_completed") or 0)
+                    if "audit_total" in event:
+                        detail["audit_total"] = int(event.get("audit_total") or 0)
+                elif event.get("type") == "worker_done":
+                    detail["waiting_stage_counts"] = {}
+                self.progress_detail = detail
             if event.get("type") == "run_finished":
                 self.current_run_id = event.get("run_id", self.current_run_id)
                 if event.get("status") == "complete":
                     self.progress = 100.0
                     self.progress_detail = {**(self.progress_detail or {}), "stage": "Concluído"}
+            if event.get("type") == "audit_complete":
+                audit_status = (event.get("summary") or {}).get("status")
+                self.progress_detail = {**(self.progress_detail or {}),
+                    "audit_active": False, "stage": "Auditoria física concluída" if audit_status == "complete"
+                    else "Auditoria física pausada" if audit_status == "paused" else "Auditoria física parcial"}
             self.events[-1]["ui_progress"] = self.progress
             self.events[-1]["ui_progress_detail"] = self.progress_detail
             self.events_condition.notify_all()
@@ -171,11 +279,23 @@ class JobServer(ThreadingHTTPServer):
             self.busy = True
             self.progress = None
             self.progress_detail = None
-            self.current_run_id = None
+            self.current_run_id = str(payload.get("run_id")) if operation == "resume" else None
+            if self.current_run_id:
+                self.progress_detail = {"stage": f"Retomando {self.current_run_id}"}
             self.attached_run_id = None
             self.external_progress_cache = (0.0, None)
-            self.stop_event = threading.Event()
+            self.stop_event = threading.Event() if operation == "preview" else None
             stop_event = self.stop_event
+
+        if operation != "preview":
+            try:
+                pid = launch_worker_process(operation, payload)
+                self.emit({"type": "worker_process_started", "pid": pid, "operation": operation})
+            finally:
+                with self.lock:
+                    self.busy = False
+                    self.stop_event = None
+            return
 
         def work() -> None:
             try:
@@ -186,26 +306,6 @@ class JobServer(ThreadingHTTPServer):
                         progress_callback=self.emit)
                     self.preview_result = result
                     self.emit({"type": "preview_ready", "result": result})
-                elif operation == "collect":
-                    result = start_collection(turns=payload["turns"], uf=payload["uf"], municipio=payload["municipio"],
-                        zona=payload["zona"], secao=payload["secao"], offset=payload["offset"], limit=payload["limit"],
-                        workers=payload["workers"],
-                        incremental=payload["incremental"], preview_dir=payload["preview_dir"],
-                        progress_callback=self.emit, stop_event=stop_event)
-                elif operation == "batch-process":
-                    result = start_batch_processing(turns=payload["turns"], uf=payload["uf"], municipio=payload["municipio"],
-                        zona=payload["zona"], secao=payload["secao"], offset=payload["offset"], limit=payload["limit"],
-                        sections_per_batch=payload["sections_per_batch"], workers=payload["workers"],
-                        preview_dir=payload["preview_dir"], confirm_clean_data=payload["confirm_clean_data"],
-                        progress_callback=self.emit, stop_event=stop_event)
-                    self.emit({"type": "worker_result", "result": result})
-                elif operation == "reprocess":
-                    result = start_reprocessing(data_root=payload.get("data_root", DATA_ROOT),
-                                               progress_callback=self.emit, stop_event=stop_event)
-                    self.emit({"type": "worker_result", "result": result})
-                else:
-                    result = resume_run(payload["run_id"], progress_callback=self.emit, stop_event=stop_event)
-                    self.emit({"type": "worker_result", "result": result})
             except Exception as error:
                 event_type = "preview_failed" if operation == "preview" else "worker_error"
                 self.emit({"type": event_type, "error": f"{type(error).__name__}: {error}"})
@@ -229,6 +329,13 @@ def _persisted_run_progress(server: JobServer, run: dict) -> tuple[float, dict]:
     total = int(run.get("total_sections") or 0)
     raw_done = extraction_done = extraction_total = 0
     db_path = STATE_ROOT / "runs" / str(run_id) / "state.sqlite3"
+    heartbeat = {}
+    heartbeat_path = STATE_ROOT / "runs" / str(run_id) / "heartbeat.json"
+    try:
+        heartbeat = json.loads(heartbeat_path.read_text(encoding="utf-8"))
+        heartbeat["age_seconds"] = max(0, round(time.time() - heartbeat_path.stat().st_mtime))
+    except (OSError, json.JSONDecodeError):
+        pass
     try:
         if db_path.is_file():
             connection = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True, timeout=2)
@@ -250,15 +357,54 @@ def _persisted_run_progress(server: JobServer, run: dict) -> tuple[float, dict]:
                 extraction_done = sum(n for raw, extraction, n in counts
                                       if raw in {"collected", "partial"} and extraction in {"complete", "failed", "not_needed"})
                 completed_units = raw_done + no_extraction_done + extraction_done
-                work_total = total * 2
-                percent = round(completed_units * 100 / work_total, 2) if work_total else 0.0
-                stage = "collection" if raw_done < total else "extraction"
+                work_total = int(run.get("progress_total_units") or total * 2)
+                progress_cap = 98 if run.get("processing_format_version", 1) >= 2 else 100
+                percent = min(progress_cap, round(completed_units * progress_cap / work_total, 2)) if work_total else 0.0
+                stage = run.get("resume_phase") or ("collection" if raw_done < total else "extraction")
                 detail = {"stage": stage, "processed": completed_units, "total": work_total,
                           "raw_processed": raw_done, "raw_total": total,
                           "extraction_processed": extraction_done, "extraction_total": total}
     except (OSError, sqlite3.Error, ValueError):
         percent = 0.0
         detail = {"stage": "Aguardando atualização do estado", "processed": 0, "total": total}
+
+    if run.get("status") == "complete":
+        percent = 100.0
+        detail = {**detail, "stage": "Concluído"}
+
+    if heartbeat:
+        age = int(heartbeat.get("age_seconds", 0))
+        detail["heartbeat_age_seconds"] = age
+        detail["last_activity_at_utc"] = heartbeat.get("heartbeat_at_utc")
+        if age > 30:
+            detail["stage"] = f"Sem atualização observável há {age} s"
+        else:
+            detail["stage"] = heartbeat.get("stage") or detail.get("stage")
+            for key in ("section", "turn", "job_id", "message", "phase_processed", "phase_total",
+                        "unique_sections", "sections_total", "checkpoint_id", "checkpoint_processed",
+                        "checkpoint_total"):
+                if heartbeat.get(key) is not None:
+                    detail[key] = heartbeat[key]
+            if heartbeat.get("phase_processed") is not None:
+                detail["processed"] = heartbeat["phase_processed"]
+            if heartbeat.get("phase_total") is not None:
+                detail["total"] = heartbeat["phase_total"]
+            if heartbeat.get("event") == "progress_update":
+                percent = round(float(heartbeat.get("progress") or percent), 2)
+            if heartbeat.get("event") == "audit_progress":
+                phase_total = int(heartbeat.get("total") or run.get("audit_total_sections") or 0)
+                phase_processed = int(heartbeat.get("processed") or run.get("audit_completed_sections") or 0)
+                percent = round(phase_processed * 100 / phase_total, 2) if phase_total else 0.0
+                detail.update({"stage": "Auditoria física do job inteiro",
+                    "processed": phase_processed, "total": phase_total,
+                    "audit_active": True, "audit_completed": phase_processed,
+                    "audit_total": phase_total})
+            elif heartbeat.get("event") == "audit_complete":
+                audit_summary = heartbeat.get("audit_summary") or {}
+                audit_label = "Auditoria física concluída" if audit_summary.get("status") == "complete" else "Auditoria física pausada"
+                detail.update({"stage": audit_label, "audit_active": False})
+    elif run.get("status") in {"preparing", "running"}:
+        detail["stage"] = "Sem heartbeat registrado nesta execução"
 
     with server.lock:
         server.external_progress_cache = (now, (run_id, percent, detail))
@@ -286,7 +432,7 @@ def _tail_jsonl(path: Path, limit: int = 100) -> list[dict]:
     return result
 
 
-def _run_details(run_id: str, offset: int = 0, limit: int = 50) -> dict:
+def _run_details(run_id: str, offset: int = 0, limit: int = 50, *, compact: bool = False) -> dict:
     if not run_id or Path(run_id).name != run_id or "/" in run_id or "\\" in run_id:
         raise ValueError("run_id inválido")
     runs_root = (STATE_ROOT / "runs").resolve()
@@ -297,8 +443,33 @@ def _run_details(run_id: str, offset: int = 0, limit: int = 50) -> dict:
     if not run_path.is_file():
         raise FileNotFoundError("execução local não encontrada")
     run = json.loads(run_path.read_text(encoding="utf-8"))
-    plan_path = run_dir / "remessas-plan.json" if run.get("kind") == "batch_process" else run_dir / "coleta-plan.json"
-    plan = json.loads(plan_path.read_text(encoding="utf-8")) if plan_path.is_file() else None
+    if compact:
+        request = run.get("request") or {}
+        counts = run.get("counts") or {}
+        plan = {
+            "unit": "seção",
+            "turns": request.get("turns") or ([request["turn"]] if request.get("turn") else []),
+            "total_sections": run.get("total_sections"),
+            "total_section_turns": counts.get("total"),
+            "total_batches": run.get("total_batches"),
+            "sections_per_batch": request.get("sections_per_batch"),
+            "worker_processes": request.get("workers"),
+            "uf": request.get("uf"),
+            "municipio": request.get("municipio"),
+            "zona": request.get("zona"),
+            "secao": request.get("secao"),
+            "offset": request.get("offset"),
+            "limit": request.get("limit"),
+            "incremental": request.get("incremental"),
+        }
+        run = dict(run)
+        for field in ("consolidation_outputs", "cleanup_failed_sections"):
+            if field in run:
+                run[f"{field}_count"] = len(run.pop(field) or [])
+        run["compact_details"] = True
+    else:
+        plan_path = run_dir / "remessas-plan.json" if run.get("kind") == "batch_process" else run_dir / "coleta-plan.json"
+        plan = json.loads(plan_path.read_text(encoding="utf-8")) if plan_path.is_file() else None
     db_path = run_dir / "state.sqlite3"
     state_counts = []
     section_jobs = {"offset": offset, "limit": limit, "total": 0, "items": []}
@@ -306,15 +477,33 @@ def _run_details(run_id: str, offset: int = 0, limit: int = 50) -> dict:
         connection = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True, timeout=2)
         connection.row_factory = sqlite3.Row
         try:
-            state_counts = [dict(row) for row in connection.execute("""SELECT raw_status,extract_status,COUNT(*) AS count
-                FROM section_jobs GROUP BY raw_status,extract_status ORDER BY raw_status,extract_status""")]
-            total = connection.execute("SELECT COUNT(*) FROM section_jobs").fetchone()[0]
-            rows = connection.execute("""SELECT turn,section_key,raw_status,extract_status,acquisition_path,error
-                FROM section_jobs ORDER BY turn,section_key LIMIT ? OFFSET ?""", (limit, offset)).fetchall()
+            section_columns = {row[1] for row in connection.execute("PRAGMA table_info(section_jobs)")}
+            consolidation_column = "consolidation_status" if "consolidation_status" in section_columns else "NULL AS consolidation_status"
+            if compact:
+                counts = run.get("counts") or {}
+                state_counts = [{"state": name, "count": count} for name, count in counts.items()
+                                if isinstance(count, int) and name != "total"]
+                total = int(counts.get("total") or 0)
+                if total <= 0:
+                    turns = request.get("turns") or ([request["turn"]] if request.get("turn") else [])
+                    total = int(run.get("total_sections") or 0) * max(1, len(turns))
+            else:
+                state_counts = [dict(row) for row in connection.execute(f"""SELECT raw_status,extract_status,
+                    {consolidation_column},COUNT(*) AS count FROM section_jobs
+                    GROUP BY raw_status,extract_status,consolidation_status
+                    ORDER BY raw_status,extract_status,consolidation_status""")]
+                total = connection.execute("SELECT COUNT(*) FROM section_jobs").fetchone()[0]
+            rows = connection.execute(f"""SELECT turn,section_key,raw_status,extract_status,
+                {consolidation_column},acquisition_path,error FROM section_jobs
+                ORDER BY turn,section_key LIMIT ? OFFSET ?""", (limit, offset)).fetchall()
             section_jobs = {"offset": offset, "limit": limit, "total": total,
                             "items": [dict(row) for row in rows]}
-            batch_states = ([dict(row) for row in connection.execute("SELECT * FROM processing_batches ORDER BY batch_index")]
-                            if run.get("kind") == "batch_process" else [])
+            if run.get("kind") == "batch_process":
+                batch_query = ("SELECT batch_index,batch_id,status,row_count,error FROM processing_batches ORDER BY batch_index"
+                               if compact else "SELECT * FROM processing_batches ORDER BY batch_index")
+                batch_states = [dict(row) for row in connection.execute(batch_query)]
+            else:
+                batch_states = []
         finally:
             connection.close()
     else:
@@ -356,8 +545,24 @@ class JobHandler(BaseHTTPRequestHandler):
                               "waiting_jobs": list(self.server.waiting_jobs)}}
             current_run_id = self.server.current_run_id
             attached_run_id = self.server.attached_run_id
-        if not state["busy"] and active_run and active_run.get("run_id") != current_run_id:
+        history_run_id = ((active_run or {}).get("run_id") or current_run_id or attached_run_id
+                          or (runs[0].get("run_id") if runs else None))
+        if history_run_id:
+            matching_events = [event for event in recent_events if event.get("run_id") == history_run_id]
+            if matching_events:
+                recent_events = matching_events[-50:]
+            else:
+                run_dir = STATE_ROOT / "runs" / str(history_run_id)
+                recent_events = _tail_jsonl(run_dir / "events.jsonl", limit=50)
+            state["recent_events"] = recent_events
+        if not state["busy"] and active_run:
             progress, detail = _persisted_run_progress(self.server, active_run)
+            worker_state_path = STATE_ROOT / "runs" / str(active_run.get("run_id")) / "worker-state.json"
+            try:
+                worker_state = json.loads(worker_state_path.read_text(encoding="utf-8"))
+                state["jobs"] = {**state["jobs"], **worker_state}
+            except (OSError, json.JSONDecodeError):
+                pass
             state.update({"busy": True, "can_stop": bool(active_run.get("cross_process_stop_supported")),
                           "attached_run": {"run_id": active_run.get("run_id"),
                                            "kind": active_run.get("kind"), "status": active_run.get("status"),
@@ -367,11 +572,10 @@ class JobHandler(BaseHTTPRequestHandler):
                 self.server.attached_run_id = active_run.get("run_id")
                 self.server.progress = progress
                 self.server.progress_detail = detail
-        elif not state["busy"] and attached_run_id and not active_run:
-            completed = next((run for run in runs if run.get("run_id") == attached_run_id), None)
-            if completed and completed.get("status") != "running":
-                state["progress"] = 100.0 if completed.get("status") == "complete" else state["progress"]
-                state["progress_detail"] = {**(state["progress_detail"] or {}), "stage": completed.get("status")}
+        elif not state["busy"] and runs:
+            latest_run = runs[0]
+            progress, detail = _persisted_run_progress(self.server, latest_run)
+            state.update({"progress": progress, "progress_detail": detail})
         state["runs"] = runs[:20]
         return state
 
@@ -469,7 +673,8 @@ class JobHandler(BaseHTTPRequestHandler):
             try:
                 offset = max(0, int(query.get("offset", ["0"])[0]))
                 limit = min(100, max(1, int(query.get("limit", ["50"])[0])))
-                self._json(200, _run_details(run_id, offset, limit))
+                compact = query.get("compact", ["0"])[0] == "1"
+                self._json(200, _run_details(run_id, offset, limit, compact=compact))
             except FileNotFoundError as error:
                 self._json(404, {"error": str(error)})
             except (ValueError, OSError, sqlite3.Error, json.JSONDecodeError) as error:
@@ -490,8 +695,7 @@ class JobHandler(BaseHTTPRequestHandler):
                 if not payload.get("preview_dir"):
                     raise ValueError("gere a prévia antes da coleta")
                 workers = int(payload.get("workers", 15))
-                if workers < 1:
-                    raise ValueError("workers deve ser pelo menos 1")
+                validate_worker_count(workers)
                 turns = ["1", "2"] if payload["turn"] == "ambos" else [payload["turn"]]
                 self.server.launch("collect", {**payload, "turns": turns, "workers": workers})
             elif path == "/api/batch-process":
@@ -502,16 +706,20 @@ class JobHandler(BaseHTTPRequestHandler):
                 workers = int(payload.get("workers", 15))
                 if not 1 <= sections_per_batch <= 10000:
                     raise ValueError("seções por remessa deve estar entre 1 e 10000")
-                if workers < 1:
-                    raise ValueError("workers deve ser pelo menos 1")
-                if payload.get("confirm_clean_data") is not True:
-                    raise ValueError("confirme a limpeza inicial de dados/")
+                validate_worker_count(workers)
+                if payload.get("confirm_processing", payload.get("confirm_clean_data")) is not True:
+                    raise ValueError("confirme o início do processamento por remessas")
                 turns = ["1", "2"] if payload["turn"] == "ambos" else [payload["turn"]]
                 self.server.launch("batch-process", {**payload, "turns": turns,
                     "sections_per_batch": sections_per_batch, "workers": workers})
             elif path == "/api/reprocess":
                 data_root = payload.get("data_root")
-                self.server.launch("reprocess", {"data_root": data_root} if data_root else {})
+                workers = int(payload.get("workers", 15))
+                validate_worker_count(workers)
+                request = {"workers": workers}
+                if data_root:
+                    request["data_root"] = data_root
+                self.server.launch("reprocess", request)
             elif path == "/api/resume":
                 if not payload.get("run_id"):
                     raise ValueError("run_id é obrigatório")
@@ -532,7 +740,7 @@ class JobHandler(BaseHTTPRequestHandler):
                 self._json(404, {"error": "not found"})
                 return
             self._json(202, {"ok": True})
-        except (ValueError, KeyError, TypeError, RuntimeError, json.JSONDecodeError) as error:
+        except (ValueError, KeyError, TypeError, RuntimeError, OSError, json.JSONDecodeError) as error:
             self._json(400, {"error": str(error)})
 
     @staticmethod

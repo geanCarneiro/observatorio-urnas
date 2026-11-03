@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import Callable
 
 
 def build_plan(inventories: dict[str, dict], *, batch_size: int = 1000,
@@ -52,6 +53,64 @@ def build_plan(inventories: dict[str, dict], *, batch_size: int = 1000,
         "total_batches": len(batches),
         "shards": shards,
         "batches": batches,
+    }
+
+
+def build_section_unit_plan(inventories: dict[str, dict], *, sections_per_checkpoint: int = 500,
+                            progress_callback: Callable[[dict], None] | None = None) -> dict:
+    """Build a rolling plan whose unit is one physical section across selected turns."""
+    if sections_per_checkpoint < 1:
+        raise ValueError("sections_per_checkpoint must be positive")
+
+    ordered_keys: list[str] = []
+    seen: set[str] = set()
+    section_turns: dict[str, list[str]] = {}
+    turns = sorted(inventories, key=lambda value: int(value))
+    total_entries = sum(len(inventories[turn].get("sections", []))
+                        for turn in turns if isinstance(inventories[turn].get("sections"), list))
+    processed_entries = 0
+    for turn in turns:
+        inventory = inventories[turn]
+        sections = inventory.get("sections")
+        if not isinstance(sections, list):
+            raise ValueError(f"inventory for turn {turn} must contain sections[]")
+        for section in sections:
+            key = "/".join(str(section[name]) for name in ("uf", "municipio", "zona", "secao"))
+            if key not in seen:
+                seen.add(key)
+                ordered_keys.append(key)
+                section_turns[key] = []
+            if str(turn) not in section_turns[key]:
+                section_turns[key].append(str(turn))
+            processed_entries += 1
+            if progress_callback and (processed_entries % 5000 == 0 or processed_entries == total_entries):
+                progress_callback({"stage": "indexing_sections", "turn": str(turn),
+                    "processed": processed_entries, "total": total_entries,
+                    "unique_sections": len(ordered_keys)})
+
+    if not ordered_keys:
+        raise ValueError("no physical sections were selected")
+
+    checkpoints = []
+    for start in range(0, len(ordered_keys), sections_per_checkpoint):
+        count = min(sections_per_checkpoint, len(ordered_keys) - start)
+        checkpoints.append({
+            "checkpoint_index": len(checkpoints),
+            "checkpoint_id": f"remessa-{len(checkpoints) + 1:05d}",
+            "section_offset": start,
+            "section_count": count,
+        })
+
+    return {
+        "plan_schema_version": 2,
+        "unit": "physical_section_across_selected_turns",
+        "turns": turns,
+        "sections_per_checkpoint": sections_per_checkpoint,
+        "total_sections": len(ordered_keys),
+        "total_section_turns": sum(len(turn_list) for turn_list in section_turns.values()),
+        "section_keys": ordered_keys,
+        "section_turns": {key: sorted(section_turns[key], key=int) for key in ordered_keys},
+        "checkpoints": checkpoints,
     }
 
 

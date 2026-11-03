@@ -2,6 +2,7 @@ dados/
 .estado-local/
 .venv/
 venv/
+.dotnet-cli-home/
 __pycache__/
 *.py[cod]
 .env
