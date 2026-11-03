@@ -23,7 +23,15 @@ public partial class ErrorDetailsWindow : Window
         var details = string.Join(Environment.NewLine + Environment.NewLine,
             new[] { ErrorMessage.Text, ErrorContext.Text, TracebackText.Text }
                 .Where(value => !string.IsNullOrWhiteSpace(value)));
-        Clipboard.SetText(details);
+        try
+        {
+            Clipboard.SetText(details);
+        }
+        catch (System.Runtime.InteropServices.ExternalException error)
+        {
+            MessageBox.Show(this, $"Não foi possível copiar os detalhes: {error.Message}",
+                "Área de transferência indisponível", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
     }
 
     private void Close_Click(object sender, RoutedEventArgs e) => Close();

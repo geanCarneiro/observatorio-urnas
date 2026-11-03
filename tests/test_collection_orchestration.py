@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -7,6 +8,7 @@ from unittest.mock import patch, Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from check_batch_report import validate_batch_report
+from local_jobs import _evidence_turns_for_section
 from orchestrate_collection import _gh_json, dispatch_plan, resume_index
 from plan_collection import build_plan, failed_batch_ids, retain_batches
 from prepare_worker_inputs import prepare_worker_inputs
@@ -15,6 +17,19 @@ from stage_batch_artifacts import stage_parts
 
 
 class CollectionOrchestrationTests(unittest.TestCase):
+    def test_cleanup_evidence_turns_use_the_selected_turn_column(self):
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.execute("""CREATE TABLE section_summaries (
+            section_key TEXT, turn INTEGER, evidence_required INTEGER)""")
+        connection.executemany("INSERT INTO section_summaries VALUES (?, ?, ?)", [
+            ("ba/1/2/3", 1, 1), ("ba/1/2/3", 2, 1), ("ba/1/2/4", 1, 1),
+            ("ba/1/2/3", 3, 0),
+        ])
+
+        self.assertEqual(_evidence_turns_for_section(connection, "ba/1/2/3"), ["1", "2"])
+        self.assertEqual(_evidence_turns_for_section(connection, "ba/1/2/4"), ["1"])
+
     def test_gh_json_forces_get_when_query_fields_are_present(self):
         response = Mock(returncode=0, stdout='{"workflow_runs": []}', stderr="")
         with patch("orchestrate_collection.subprocess.run", return_value=response) as gh_run:

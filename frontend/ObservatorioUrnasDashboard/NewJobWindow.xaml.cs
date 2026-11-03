@@ -11,6 +11,7 @@ public partial class NewJobWindow : Window
     private readonly CancellationToken _ownerToken;
     private JobPreview? _preview;
     private bool _previewing;
+    private bool _starting;
     private bool _initializing;
 
     public NewJobWindow(PythonUiBackend backend, NewJobConfiguration? initial,
@@ -77,7 +78,7 @@ public partial class NewJobWindow : Window
             "reprocess" => "Reprocessa aquisições locais já existentes. Não baixa dados brutos.",
             _ => "Por padrão, ignora arquivos já existentes. Desmarque o modo incremental para atualizar os dados brutos das seções selecionadas.",
         };
-        StartButton.IsEnabled = !_previewing && (reprocess || _preview is not null);
+        StartButton.IsEnabled = !_previewing && !_starting && (reprocess || _preview is not null);
     }
 
     private async void Preview_Click(object sender, RoutedEventArgs e)
@@ -105,6 +106,9 @@ public partial class NewJobWindow : Window
 
     private async void Start_Click(object sender, RoutedEventArgs e)
     {
+        if (_starting) return;
+        _starting = true;
+        UpdateMode();
         try
         {
             ErrorText.Text = "";
@@ -136,9 +140,15 @@ public partial class NewJobWindow : Window
                 if (answer != MessageBoxResult.Yes) return;
                 await _backend.StartCollectionAsync(configuration, _preview, _ownerToken);
             }
+            _starting = false;
             DialogResult = true;
         }
         catch (Exception error) { ErrorText.Text = error.Message; }
+        finally
+        {
+            _starting = false;
+            UpdateMode();
+        }
     }
 
     private NewJobConfiguration ReadConfiguration()
@@ -182,10 +192,12 @@ public partial class NewJobWindow : Window
 
     private void Window_Closing(object? sender, CancelEventArgs e)
     {
-        if (_previewing)
+        if (_previewing || _starting)
         {
             e.Cancel = true;
-            ErrorText.Text = "Aguarde o cálculo da prévia terminar.";
+            ErrorText.Text = _previewing
+                ? "Aguarde o cálculo da prévia terminar."
+                : "Aguarde o início do job terminar.";
         }
     }
 }

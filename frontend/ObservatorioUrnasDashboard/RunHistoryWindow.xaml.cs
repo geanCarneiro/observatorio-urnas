@@ -289,6 +289,8 @@ public partial class RunHistoryWindow : Window
         {
             using var requestDocument = JsonDocument.Parse(_selected.Summary.RequestJson);
             var request = requestDocument.RootElement;
+            if (request.ValueKind != JsonValueKind.Object)
+                throw new InvalidOperationException("Os parâmetros desta execução não estão em formato de objeto JSON.");
             var turn = Value(request, "turn");
             if (string.IsNullOrWhiteSpace(turn) && request.TryGetProperty("turns", out var turns)
                 && turns.ValueKind == JsonValueKind.Array)
@@ -373,9 +375,16 @@ public partial class RunHistoryWindow : Window
 
     private static List<LabelValue> ReadParameters(string json, string dataRoot)
     {
-        using var document = JsonDocument.Parse(json);
+        using var document = TryParseDocument(json);
+        if (document is null)
+            return [new LabelValue("Parâmetros", "JSON indisponível ou inválido"), new LabelValue("Raiz dos dados", Display(dataRoot))];
         var request = document.RootElement;
         var rows = new List<LabelValue>();
+        if (request.ValueKind != JsonValueKind.Object)
+        {
+            Add("Raiz dos dados", dataRoot);
+            return rows;
+        }
         var turn = Value(request, "turn");
         if (string.IsNullOrWhiteSpace(turn) && request.TryGetProperty("turns", out var turns)
             && turns.ValueKind == JsonValueKind.Array)
@@ -402,7 +411,8 @@ public partial class RunHistoryWindow : Window
 
     private static List<LabelValue> ReadCounts(string json)
     {
-        using var document = JsonDocument.Parse(json);
+        using var document = TryParseDocument(json);
+        if (document is null) return [];
         var labels = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             ["total"] = "Total de posições", ["collected"] = "Coletadas",
@@ -432,28 +442,28 @@ public partial class RunHistoryWindow : Window
 
     private static EventHistoryItem ToActivity(JsonElement element)
     {
-        var message = Value(element, "message");
-        var error = Value(element, "error");
-        if (string.IsNullOrWhiteSpace(message)) message = error;
-        var worker = Value(element, "worker_id");
-        if (string.IsNullOrWhiteSpace(worker) && Value(element, "process_id") is { Length: > 0 } processId)
+        var message = OptionalString(element, "message") ?? "";
+        var error = OptionalString(element, "error");
+        if (string.IsNullOrWhiteSpace(message)) message = error ?? "";
+        var worker = OptionalString(element, "worker_id") ?? "";
+        if (string.IsNullOrWhiteSpace(worker) && OptionalScalarString(element, "process_id") is { Length: > 0 } processId)
             worker = $"PID {processId}";
         var parameters = element.TryGetProperty("worker_parameters", out var workerParameters)
             && workerParameters.ValueKind == JsonValueKind.Object
             ? workerParameters.GetRawText() : "";
-        var eventType = Value(element, "type");
-        var eventStatus = Value(element, "status");
+        var eventType = OptionalString(element, "type") ?? "";
+        var eventStatus = OptionalString(element, "status") ?? "";
         if (eventType == "stage_complete" && !string.IsNullOrWhiteSpace(error))
             eventStatus = "failed";
         var typeLabel = eventType == "stage_complete"
             ? eventStatus == "failed" ? "Etapa falhou" : "Etapa concluída"
             : Humanize(eventType);
-        return new EventHistoryItem(FormatDate(Value(element, "recorded_at_utc")),
-            typeLabel, Value(element, "stage"),
-            FormatSection(Value(element, "section"), Value(element, "turn")),
+        var traceback = OptionalString(element, "traceback") ?? "";
+        return new EventHistoryItem(FormatDate(OptionalString(element, "recorded_at_utc") ?? ""),
+            typeLabel, OptionalString(element, "stage") ?? "",
+            FormatSection(OptionalString(element, "section") ?? "", OptionalScalarString(element, "turn") ?? ""),
             StatusLabel(eventStatus), worker, parameters, message,
-            Value(element, "traceback"), !string.IsNullOrWhiteSpace(error)
-                || !string.IsNullOrWhiteSpace(Value(element, "traceback")));
+            traceback, !string.IsNullOrWhiteSpace(error) || !string.IsNullOrWhiteSpace(traceback));
     }
 
     private static string FormatSection(string section, string turn) =>
@@ -489,14 +499,27 @@ public partial class RunHistoryWindow : Window
     private static string FormatNumber(long value) => value.ToString("N0", System.Globalization.CultureInfo.GetCultureInfo("pt-BR"));
     private static string CountProperty(string json, string property)
     {
-        using var document = JsonDocument.Parse(json);
-        return document.RootElement.TryGetProperty(property, out var value) && value.TryGetInt64(out var count)
+        using var document = TryParseDocument(json);
+        if (document is null) return "—";
+        return document.RootElement.ValueKind == JsonValueKind.Object
+            && document.RootElement.TryGetProperty(property, out var value) && value.TryGetInt64(out var count)
             ? FormatNumber(count) : "—";
+    }
+    private static JsonDocument? TryParseDocument(string json)
+    {
+        try { return JsonDocument.Parse(json); }
+        catch (JsonException) { return null; }
     }
     private static string Display(string value) => string.IsNullOrWhiteSpace(value) ? "—" : value;
     private static string Value(JsonElement element, string property) =>
         element.ValueKind == JsonValueKind.Object && element.TryGetProperty(property, out var value)
             ? FormatValue(value) : "";
+    private static string? OptionalString(JsonElement element, string property) =>
+        element.ValueKind == JsonValueKind.Object && element.TryGetProperty(property, out var value)
+            && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+    private static string? OptionalScalarString(JsonElement element, string property) =>
+        element.ValueKind == JsonValueKind.Object && element.TryGetProperty(property, out var value)
+            && value.ValueKind is JsonValueKind.String or JsonValueKind.Number ? value.ToString() : null;
     private static string Value(JsonElement element) => FormatValue(element);
     private static int IntValue(JsonElement element, string property, int fallback = 0) =>
         element.ValueKind == JsonValueKind.Object && element.TryGetProperty(property, out var value)

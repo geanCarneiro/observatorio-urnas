@@ -305,7 +305,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void OpenBrowser_Click(object sender, RoutedEventArgs e)
     {
         if (_backend.BaseUri is null) return;
-        Process.Start(new ProcessStartInfo(_backend.BaseUri.ToString()) { UseShellExecute = true });
+        try
+        {
+            Process.Start(new ProcessStartInfo(_backend.BaseUri.ToString()) { UseShellExecute = true });
+        }
+        catch (Exception error)
+        {
+            StatusMessage = $"Não foi possível abrir o navegador: {error.Message}";
+        }
     }
 
     private void NewJob_Click(object sender, RoutedEventArgs e) => OpenNewJobWindow();

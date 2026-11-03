@@ -80,6 +80,13 @@ def validate_worker_count(workers: int) -> int:
     return workers
 
 
+def _evidence_turns_for_section(connection: sqlite3.Connection, section_key: str) -> list[str]:
+    """Return turns that require raw evidence preservation for a section."""
+    return [str(int(row["turn"])) for row in connection.execute(
+        "SELECT turn FROM section_summaries WHERE section_key=? AND evidence_required=1 ORDER BY turn",
+        (section_key,))]
+
+
 def _prepare_process_worker_state_dir(run_dir: Path) -> Path:
     """Start a fresh display snapshot set for this process-pool lifetime."""
     worker_state_dir = run_dir / "workers"
@@ -2244,9 +2251,7 @@ def _execute_section_unit_processing(run_dir: Path, connection: sqlite3.Connecti
     def cleanup_task(key: str) -> dict:
         summary_rows = [json.loads(row[0]) for row in connection.execute(
             "SELECT row_json FROM section_summaries WHERE section_key=? ORDER BY turn", (key,))]
-        evidence_turns = [str(int(row["turno"])) for row in connection.execute(
-            "SELECT turn FROM section_summaries WHERE section_key=? AND evidence_required=1 ORDER BY turn",
-            (key,))]
+        evidence_turns = _evidence_turns_for_section(connection, key)
         raw_expected_turns = {str(int(row[0])) for row in connection.execute(
             "SELECT turn FROM section_jobs WHERE section_key=? AND acquisition_path IS NOT NULL", (key,))}
         return {"stage": "cleanup", "section_key": key, "turns": turns_by_key[key],
